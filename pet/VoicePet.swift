@@ -621,7 +621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.placeBubble(session); m.peek(true)
             }
             hoverWork[session] = w
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: w)
+            DispatchQueue.main.async(execute: w)                                    // reveal on hover right away
         } else {
             m.peek(false)
         }
