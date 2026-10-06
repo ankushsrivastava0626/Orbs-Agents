@@ -175,7 +175,6 @@ struct ReplyCardView: View {
         .offset(x: center - 220)                                        // slide toward the orb
         .scaleEffect(x: 1, y: unfolded ? 1 : 0.15, anchor: .bottom)   // unfolds upward from one line
         .opacity(unfolded ? 1 : 0)
-        .onTapGesture { dismiss() }
         .onAppear {
             withAnimation(OSMotion.show) { unfolded = true }
             for i in 0...parts.count {
