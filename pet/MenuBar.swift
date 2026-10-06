@@ -95,8 +95,11 @@ struct MenuBarView: View {
             HStack(spacing: 12) {
                 Text(m.windowTitle).font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundColor(.white.opacity(0.65)).lineLimit(1).truncationMode(.middle)
-                    .frame(maxWidth: m.rightWidth - 140, alignment: .trailing)
+                    .frame(maxWidth: m.rightWidth - 260, alignment: .trailing)
                     .modifier(stagger(1))
+                Text(m.now, format: .dateTime.weekday(.abbreviated).hour().minute())
+                    .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white).monospacedDigit()
+                    .modifier(stagger(2))
                 Button(action: { m.onBackToBox?() }) {
                     Image(systemName: "arrow.down.right.and.arrow.up.left").font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.white.opacity(0.85))

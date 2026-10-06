@@ -1207,7 +1207,7 @@ final class OSMode {
             let p = CGPoint(x: loc.x, y: (NSScreen.screens.first?.frame.height ?? 0) - loc.y)
             guard let box = os.chromeBoxTitleBar(at: p) else { return Unmanaged.passUnretained(event) }
             os.swallowNextUp = true
-            DispatchQueue.main.async { os.toggleChromeMode(box) }
+            DispatchQueue.main.async { box.lastToggle = Date(); os.toggleFill(box) }   // fill the screen (boxed, bars showing) / back
             return nil                                               // don't let macOS zoom/minimize it
         }
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
