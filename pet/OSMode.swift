@@ -1045,6 +1045,8 @@ final class OSMode {
         var chromeProfile: String? = nil // Chrome profile directory ("Default", "Profile 2"…) this window belongs to
         var restoreFrame: CGRect? = nil // set while the box fills the screen (green button); toggles back
         var busyUntil = Date.distantPast // ignore fullscreen state while we're switching it
+        var armed = true                  // react to the green button only after seeing it out of fullscreen
+        var lastToggle = Date.distantPast
         var target: CGRect
         init(pid: pid_t, win: AXUIElement, target: CGRect) {
             self.pid = pid; self.win = win; self.target = target
@@ -1147,7 +1149,10 @@ final class OSMode {
         for box in boxes {
             let app = NSRunningApplication(processIdentifier: box.pid)
             guard app?.isHidden == false, !isMinimized(box.win) else { box.frame = nil; continue }
-            if isFullScreen(box.win), Date() > box.busyUntil {
+            let fs = isFullScreen(box.win)
+            if !fs, Date() > box.busyUntil { box.armed = true }            // seen out of fullscreen: next press counts
+            if fs, Date() > box.busyUntil, box.armed, Date().timeIntervalSince(box.lastToggle) > 2 {
+                box.armed = false; box.lastToggle = Date()
                 // green button: don't leave the canvas for a fullscreen Space; make the box fill the screen
                 // instead (still a window). Pressing it again puts the box back to its size.
                 AXUIElementSetAttributeValue(box.win, "AXFullScreen" as CFString, kCFBooleanFalse)
@@ -1435,8 +1440,8 @@ final class OSMode {
 
     /// macOS animates out of fullscreen and then restores the old frame itself; wait until that's over,
     /// then keep applying our frame until it sticks.
-    private func applyAfterFullscreenExit(_ box: Box, _ target: CGRect, tries: Int, stableSince: Date?) {
-        guard on, tries < 40 else { box.busyUntil = Date(); return }
+    private func applyAfterFullscreenExit(_ box: Box, _ target: CGRect, tries: Int, stableSince: Date?, last: CGRect? = nil) {
+        guard on, tries < 40 else { box.busyUntil = Date().addingTimeInterval(1); return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self else { return }
             if self.isFullScreen(box.win) {                        // still animating out
@@ -1445,14 +1450,17 @@ final class OSMode {
                 return
             }
             let since = stableSince ?? Date()
-            if let r = self.frameOf(box.win), abs(r.width - target.width) < 4, abs(r.height - target.height) < 4,
-               abs(r.minX - target.minX) < 4, abs(r.minY - target.minY) < 4, Date().timeIntervalSince(since) > 0.6 {
-                box.frame = r
-                box.busyUntil = Date()                              // done: it held for 0.6 s
+            let r = self.frameOf(box.win)
+            let close = r.map { abs($0.width - target.width) < 4 && abs($0.height - target.height) < 4
+                                && abs($0.minX - target.minX) < 4 && abs($0.minY - target.minY) < 4 } ?? false
+            let still = r != nil && last != nil && r == last                    // the window has stopped moving
+            if (close && Date().timeIntervalSince(since) > 0.6) || (tries >= 6 && still) {
+                if let r { box.frame = r }
+                box.busyUntil = Date().addingTimeInterval(0.8)      // done; settle before watching again
                 return
             }
-            self.setFrame(box.win, target)
-            self.applyAfterFullscreenExit(box, target, tries: tries + 1, stableSince: since)
+            if tries < 6 { self.setFrame(box.win, target) }        // a few firm tries, then let it settle
+            self.applyAfterFullscreenExit(box, target, tries: tries + 1, stableSince: since, last: r)
         }
     }
 
