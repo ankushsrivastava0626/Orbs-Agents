@@ -5,6 +5,10 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
+/// Private but long-stable: the CGWindowID behind an Accessibility window element.
+@_silgen_name("_AXUIElementGetWindow")
+func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 // MARK: - Dial model
 
 struct DialApp: Identifiable, Equatable {
@@ -1038,6 +1042,7 @@ final class OSMode {
         var settleUntil: Date          // while the app is still opening, keep forcing our frame and don't save
         var lastTitle = ""             // browsers: page we last reset to 100% zoom
         var tablet: Bool? = nil        // Chrome: true = app window (no tabs), false = tabbed, nil = unknown
+        var chromeProfile: String? = nil // Chrome profile directory ("Default", "Profile 2"…) this window belongs to
         var restoreFrame: CGRect? = nil // set while the box fills the screen (green button); toggles back
         var busyUntil = Date.distantPast // ignore fullscreen state while we're switching it
         var target: CGRect
@@ -1049,6 +1054,7 @@ final class OSMode {
     private var boxes: [Box] = []
     private var pendingFrame: [pid_t: CGRect] = [:]
     private var pendingTablet: [pid_t: Bool] = [:]       // mode of the next Chrome window we open
+    private var pendingProfile: [pid_t: String?] = [:]   // and its Chrome profile
     private var trackTick = 0
     private var watching = Set<pid_t>()                 // apps whose new windows become boxes
 
@@ -1096,6 +1102,7 @@ final class OSMode {
         }
         let box = Box(pid: pid, win: win, target: target)
         box.tablet = pendingTablet.removeValue(forKey: pid)
+        if let p = pendingProfile.removeValue(forKey: pid) { box.chromeProfile = p }
         if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.google.Chrome" {
             // build Chrome's accessibility tree now, so the page address is readable when you switch modes
             AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXManualAccessibility" as CFString, kCFBooleanTrue)
@@ -1302,7 +1309,10 @@ final class OSMode {
         boxes.removeAll { $0 === box }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        p.arguments = ["-na", "Google Chrome", "--args"] + (tabbed ? ["--app=\(url)"] : ["--new-window", url])
+        let profile = box.chromeProfile ?? chromeProfile(of: box.win)
+        pendingProfile[box.pid] = profile
+        p.arguments = ["-na", "Google Chrome", "--args"] + (profile.map { ["--profile-directory=\($0)"] } ?? [])
+            + (tabbed ? ["--app=\(url)"] : ["--new-window", url])
         try? p.run()
         // the new window is picked up by trackBoxes (watching Chrome) and takes `pendingFrame`
     }
@@ -1317,6 +1327,21 @@ final class OSMode {
         let r = NSAppleScript(source: "tell application \"Google Chrome\" to get URL of active tab of front window")?
             .executeAndReturnError(&err)
         return r?.stringValue
+    }
+
+    /// Which Chrome profile a window belongs to. With several profiles, Chrome ends normal window titles with
+    /// " - <profile name>"; map that name to its directory through Chrome's Local State file.
+    func chromeProfile(of win: AXUIElement) -> String? {
+        let title = (attr(win, kAXTitleAttribute) as? String) ?? ""
+        let path = NSHomeDirectory() + "/Library/Application Support/Google/Chrome/Local State"
+        guard let d = FileManager.default.contents(atPath: path),
+              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+              let cache = (j["profile"] as? [String: Any])?["info_cache"] as? [String: [String: Any]] else { return nil }
+        if cache.count == 1 { return cache.keys.first }
+        for (dir, info) in cache {
+            if let name = info["name"] as? String, !name.isEmpty, title.hasSuffix(" - " + name) { return dir }
+        }
+        return nil
     }
 
     private func pageURL(_ win: AXUIElement) -> String? {
@@ -1441,11 +1466,21 @@ final class OSMode {
         return AXUIElementCopyAttributeValue(win, "AXFullScreen" as CFString, &v) == .success && (v as? Bool) == true
     }
 
+    /// Window numbers on the desktop you're looking at (windows on other Spaces aren't listed).
+    private func onScreenWindowIDs() -> Set<CGWindowID> {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return Set(list.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value })
+    }
+
     private func refreshCanvas() {
         refreshDock()
         refreshMenuBar()
+        let visible = onScreenWindowIDs()
         for (_, canvas, screen) in canvases {
-            canvas.boxes = boxes.compactMap(\.frame)
+            canvas.boxes = boxes.filter { b in
+                var wid: CGWindowID = 0
+                return _AXUIElementGetWindow(b.win, &wid) != .success || visible.contains(wid)   // this desktop only
+            }.compactMap(\.frame)
                 .filter { $0.intersects(screen.frame) }
                 .map { $0.offsetBy(dx: -screen.frame.minX, dy: -screen.frame.minY) }
         }

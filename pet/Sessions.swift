@@ -53,8 +53,12 @@ struct SessionOrb: View {
         let target = s.target == entry.name
         if entry.kind == "codex" {
             let live = codex.s.thread_id == entry.id
-            OrbFace(mode: !codex.online ? .offline : (live ? codex.mode : .idle),
-                    level: live ? codex.s.level : 0, outLevel: live ? codex.s.out_level : 0,
+            let codexMode: Mode = !codex.online ? .offline
+                : (target && s.listening) ? .listening                  // the pet is recording for this orb
+                : (target && now - s.heard_at < 0.6) ? .sent
+                : (live ? codex.mode : .idle)
+            OrbFace(mode: codexMode,
+                    level: (target && s.listening) ? s.level : (live ? codex.s.level : 0), outLevel: live ? codex.s.out_level : 0,
                     auto: live && codex.s.auto, problem: live && codex.s.approval,
                     idleColor: Color(red: 1.0, green: 0.73, blue: 0.3), selected: target, muted: live && codex.s.muted)
                 .scaleEffect(0.62)
@@ -155,14 +159,14 @@ final class SessionsController: NSObject {
         }
     }
 
-    // MARK: speak hotkeys (1st orb: left Option, 2nd: left Control, 3rd+: none unless you set one)
+    // MARK: speak hotkeys (1st orb: left Control, 2nd: left Option, 3rd+: none unless you set one)
 
     func hotkey(for e: OrbEntry) -> Hotkey? {
         let k: Hotkey
         if let h = e.hotkey { k = h }
         else {
             let i = entries.firstIndex { $0.name == e.name } ?? 99
-            k = i == 0 ? .leftOption : i == 1 ? .leftControl : .none
+            k = i == 0 ? .leftControl : i == 1 ? .leftOption : .none
         }
         return k.code < 0 ? nil : k
     }
@@ -274,8 +278,6 @@ final class SessionsController: NSObject {
             return true
         }
         if down, held == nil, let e2 = entries.first(where: { hotkey(for: $0)?.code == code }) {
-            // Codex already listens to Control itself: let it handle a Codex orb on Control
-            if e2.kind == "codex", code == 59 || code == 62 { return false }
             if type == .flagsChanged, flags & 0x1E0000 & ~Self.ownMask(code) != 0 { return false }  // part of a chord
             held = (code, e2.name)
             DispatchQueue.main.async { self.post5123("/ptt", ["name": e2.name, "kind": e2.kind, "down": "1"]) }

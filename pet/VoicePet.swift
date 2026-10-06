@@ -608,10 +608,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var cornerHover = false
 
+    private var hoverWork: [String: DispatchWorkItem] = [:]
+
+    /// Show an orb's last reply only once the cursor has rested on it (not while just passing over).
     func peekBubble(_ session: String, _ on: Bool) {
+        hoverWork[session]?.cancel()
         guard let (m, _) = bubbles[session] else { return }
-        placeBubble(session)
-        m.peek(on)
+        if on {
+            let w = DispatchWorkItem { [weak self] in self?.placeBubble(session); m.peek(true) }
+            hoverWork[session] = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: w)
+        } else {
+            m.peek(false)
+        }
     }
 
     func bubble(for session: String) -> (CaptionsModel, NSPanel) {
