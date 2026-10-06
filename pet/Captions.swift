@@ -15,7 +15,7 @@ struct ReplyCard: Identifiable, Equatable {
     let text: String
     let born: Date
     var muted = true                     // false: it was spoken aloud (hover shows it again)
-    var stay: Double { min(22, 5 + Double(text.count) * 0.045) }    // time to read it
+    var stay: Double { 10 }                                          // auto-hide after 10 s (or click outside)
 }
 
 final class CaptionsModel: ObservableObject {
@@ -73,6 +73,12 @@ final class CaptionsModel: ObservableObject {
 
     /// Seed with what already happened so old replies don't pop up when the pet starts.
     func markSeen(_ ids: [String]) { ids.forEach { seen.insert($0) } }
+
+    /// Fade every bubble of this orb (typing field opened, or a click outside).
+    func dismissAll() {
+        peeking = false; hovering = false
+        cards.map(\.id).forEach(dismiss)
+    }
 
     func dismiss(_ id: String) {
         withAnimation(OSMotion.hide) { cards.removeAll { $0.id == id } }

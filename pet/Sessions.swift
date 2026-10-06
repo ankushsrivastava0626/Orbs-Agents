@@ -390,6 +390,7 @@ final class SessionsController: NSObject {
     func openTyping(_ name: String) {
         guard let e = entries.first(where: { $0.name == name }) else { return }
         if e.kind == "codex", codex.s.thread_id != e.id { codexPost("/sessions/resume", ["session": e.id]) }
+        app?.bubbles[e.name]?.0.dismissAll()                          // the field takes the bubble's place
         // anchor above the orb itself: its dock spot in OS mode, else the corner orb (fall back to the mouse)
         let orb = OrbAnchors.shared.screenRect(e.name) ?? app?.orbPanels.first.map { $0.frame }
         let anchor = orb.map { NSPoint(x: $0.midX, y: $0.maxY) } ?? NSEvent.mouseLocation

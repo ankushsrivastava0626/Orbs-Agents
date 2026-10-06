@@ -593,6 +593,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setupCaptions() {
         Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in self?.feedCaptions() }
+        // a click anywhere outside the bubbles closes them (clicking a bubble closes that one)
+        let outside: (NSEvent) -> Void = { [weak self] _ in
+            guard let self else { return }
+            let p = NSEvent.mouseLocation
+            for (_, (m, panel)) in self.bubbles where !m.cards.isEmpty {
+                if !panel.frame.contains(p) { m.dismissAll() }
+            }
+        }
+        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: outside)
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { outside($0); return $0 }
         osMode.dock.onOrbHover = { [weak self] name, on in self?.peekBubble(name, on) }
     }
 
