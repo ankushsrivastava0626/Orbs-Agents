@@ -1194,6 +1194,12 @@ final class OSMode {
                 if let f = os.dialPanel?.frame, !os.dialHit(p, in: f) { DispatchQueue.main.async { os.hideDial() } }
             }
             if type == .leftMouseUp, os.swallowNextUp { os.swallowNextUp = false; return nil }
+            if type == .leftMouseDown, let box = os.boxGreenButton(at: event.location) {
+                // green button: fill the screen ourselves (no native fullscreen, so nothing to fight)
+                os.swallowNextUp = true
+                DispatchQueue.main.async { box.lastToggle = Date(); os.toggleFill(box) }
+                return nil
+            }
             guard type == .leftMouseDown, event.getIntegerValueField(.mouseEventClickState) == 2 else {
                 return Unmanaged.passUnretained(event)
             }
@@ -1212,6 +1218,27 @@ final class OSMode {
         clickSource = CFMachPortCreateRunLoopSource(nil, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), clickSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    /// The box whose green (fullscreen) title-bar button is under this point (top-left coords), if any.
+    func boxGreenButton(at loc: CGPoint) -> Box? {
+        let h = NSScreen.screens.first?.frame.height ?? 0
+        let p = CGPoint(x: loc.x, y: h - loc.y)
+        for box in boxes.reversed() {
+            guard let f = box.frame, f.contains(p), p.y > f.maxY - 44 else { continue }   // only near the top edge
+            for attr in [kAXFullScreenButtonAttribute, kAXZoomButtonAttribute] {
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(box.win, attr as CFString, &ref) == .success, let ref else { continue }
+                let btn = ref as! AXUIElement
+                var pv: CFTypeRef?, sv: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(btn, kAXPositionAttribute as CFString, &pv) == .success,
+                      AXUIElementCopyAttributeValue(btn, kAXSizeAttribute as CFString, &sv) == .success else { continue }
+                var pos = CGPoint.zero, size = CGSize.zero
+                AXValueGetValue(pv as! AXValue, .cgPoint, &pos); AXValueGetValue(sv as! AXValue, .cgSize, &size)
+                if CGRect(origin: pos, size: size).insetBy(dx: -2, dy: -2).contains(loc) { return box }
+            }
+        }
+        return nil
     }
 
     private func removeClickTap() {
@@ -1421,7 +1448,7 @@ final class OSMode {
     }
 
     /// Fill the screen (above the dock) as a window, or put it back in its box.
-    private func toggleFill(_ box: Box) {
+    func toggleFill(_ box: Box) {
         box.busyUntil = Date().addingTimeInterval(5)            // until the switch below finishes
         let base = box.frame ?? box.target
         var screen = (NSScreen.screens.first { $0.frame.contains(CGPoint(x: base.midX, y: base.midY)) }
