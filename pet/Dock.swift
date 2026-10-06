@@ -32,6 +32,8 @@ final class DockModel: ObservableObject {
     var orbView: ((String) -> AnyView)?
     var onOrbClick: ((String) -> Void)?
     var onOrbHover: ((String, Bool) -> Void)?
+    var onOrbDrag: ((String, Int, NSPoint) -> Void)?
+    @Published var draggingId: String? = nil
     var onOrbMenuFor: ((String, NSView, CGPoint) -> Void)?
     var onPlus: ((NSView, CGPoint) -> Void)?
 }
@@ -58,11 +60,17 @@ struct OrbAnchor: NSViewRepresentable {
 struct RightClickReader: NSViewRepresentable {
     let onClick: (NSView, CGPoint) -> Void
     var onLeftClick: (() -> Void)? = nil                 // plain click (this view sits on top, so it must handle it)
-    func makeNSView(context: Context) -> NSView { V(onClick: onClick, onLeft: onLeftClick) }
-    func updateNSView(_ v: NSView, context: Context) { (v as? V)?.onClick = onClick; (v as? V)?.onLeft = onLeftClick }
+    var onDrag: ((Int, NSPoint) -> Void)? = nil          // 0 began, 1 moved, 2 ended (screen point)
+    func makeNSView(context: Context) -> NSView { let v = V(onClick: onClick, onLeft: onLeftClick); v.onDrag = onDrag; return v }
+    func updateNSView(_ v: NSView, context: Context) {
+        (v as? V)?.onClick = onClick; (v as? V)?.onLeft = onLeftClick; (v as? V)?.onDrag = onDrag
+    }
     final class V: NSView {
         var onClick: (NSView, CGPoint) -> Void
         var onLeft: (() -> Void)?
+        var onDrag: ((Int, NSPoint) -> Void)?
+        private var downAt: NSPoint?
+        private var dragging = false
         init(onClick: @escaping (NSView, CGPoint) -> Void, onLeft: (() -> Void)?) {
             self.onClick = onClick; self.onLeft = onLeft; super.init(frame: .zero)
         }
@@ -70,8 +78,18 @@ struct RightClickReader: NSViewRepresentable {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
         override func rightMouseDown(with e: NSEvent) { onClick(self, convert(e.locationInWindow, from: nil)) }
         override func mouseDown(with e: NSEvent) {
-            if e.modifierFlags.contains(.control) { onClick(self, convert(e.locationInWindow, from: nil)) }
-            else { onLeft?() }
+            if e.modifierFlags.contains(.control) { onClick(self, convert(e.locationInWindow, from: nil)); return }
+            downAt = NSEvent.mouseLocation; dragging = false
+        }
+        override func mouseDragged(with e: NSEvent) {
+            guard let d = downAt, onDrag != nil else { return }
+            let p = NSEvent.mouseLocation
+            if !dragging, hypot(p.x - d.x, p.y - d.y) > 4 { dragging = true; onDrag?(0, p) }
+            if dragging { onDrag?(1, p) }
+        }
+        override func mouseUp(with e: NSEvent) {
+            defer { downAt = nil; dragging = false }
+            if dragging { onDrag?(2, NSEvent.mouseLocation) } else if downAt != nil { onLeft?() }   // a click
         }
     }
 }
@@ -120,8 +138,12 @@ struct DockView: View {
             ForEach(m.orbIds, id: \.self) { id in                  // session orbs: click = talk to it
                 (m.orbView?(id) ?? AnyView(EmptyView()))
                     .frame(width: 36, height: 36)
+                    .scaleEffect(m.draggingId == id ? 1.18 : 1)           // lifted while you drag it
+                    .shadow(color: .white.opacity(m.draggingId == id ? 0.25 : 0), radius: 8)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.75), value: m.draggingId)
                     .overlay(RightClickReader(onClick: { v, p in m.onOrbMenuFor?(id, v, p) },
-                                              onLeftClick: { m.onOrbClick?(id) }))
+                                              onLeftClick: { m.onOrbClick?(id) },
+                                              onDrag: { phase, p in m.onOrbDrag?(id, phase, p) }))
                     .background(OrbAnchor(id: id))                       // speech bubbles point here
                     .onHover { m.onOrbHover?(id, $0) }
             }

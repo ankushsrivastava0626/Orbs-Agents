@@ -1,5 +1,6 @@
 #!/bin/bash
 # Tell the pet overlay what Claude is doing. usage: event.sh <Prompt|Step|Stop>  (hook JSON on stdin)
+[ "$VOICE_SESSION" = 1 ] || { cat >/dev/null; exit 0; }   # only voice sessions (orbs) report; the desktop app stays out
 source "$HOME/.claude/voice/lib.sh"
 case "$1" in
   Prompt) BODY='{"claude":"working","step":"Thinking…"}' ;;

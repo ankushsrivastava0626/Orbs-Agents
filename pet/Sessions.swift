@@ -1,4 +1,4 @@
-// Voice sessions as orbs. One default Claude orb ("voice"), plus as many Claude or Codex sessions as you
+// Voice sessions as orbs: as many Claude or Codex sessions as you
 // like, each its own orb in the dock. Click an orb to talk to it (gold ring); two-finger click for its menu
 // (transcript, Terminal, stop, resume, close). The ＋ button starts a new Claude or Codex session.
 // Codex sessions run on the Codex voice server (:5124); its approval prompts are shown here.
@@ -65,8 +65,7 @@ struct SessionOrb: View {
         } else {
             let st = s.sessions[entry.name]
             let working = (st?.state == "working" && now - (st?.at ?? 0) < 600)
-                || (entry.name == "voice" && s.sessions.isEmpty && s.voice_claude == "working" && now - s.voice_claude_at < 600)
-            let speaking = s.speaking && (s.speaking_session == entry.name || (s.speaking_session.isEmpty && entry.name == "voice"))
+            let speaking = s.speaking && s.speaking_session == entry.name
             let mode: Mode = !main.online ? .offline
                 : (target && s.listening) ? .listening
                 : (target && now - s.heard_at < 0.6) ? .sent
@@ -107,9 +106,7 @@ final class SessionsController: NSObject {
 
     func load() {
         var list = (try? JSONDecoder().decode([OrbEntry].self, from: Data(contentsOf: URL(fileURLWithPath: orbsPath)))) ?? []
-        if !list.contains(where: { $0.name == "voice" }) {        // the default orb always exists
-            list.insert(OrbEntry(name: "voice", kind: "claude", id: "", cwd: "/Users/kush/Githubs/persistent agent"), at: 0)
-        }
+        list.removeAll { $0.closed == true || ($0.kind == "claude" && $0.id.isEmpty) }   // no permanent default orb
         if list != entries {
             entries = list
             dock?.orbIds = list.map(\.name)
@@ -129,6 +126,7 @@ final class SessionsController: NSObject {
             return AnyView(SessionOrb(entry: e, main: self.main, codex: self.codex))
         }
         dock.onOrbClick = { [weak self] name in self?.openTyping(name) }
+        dock.onOrbDrag = { [weak self] name, phase, p in self?.drag(name, phase, p) }
         dock.onOrbMenuFor = { [weak self] name, v, p in self?.orbMenu(name).popUp(positioning: nil, at: p, in: v) }
         dock.onPlus = { [weak self] v, p in self?.plusMenu().popUp(positioning: nil, at: p, in: v) }
     }
@@ -147,7 +145,7 @@ final class SessionsController: NSObject {
 
     /// Relaunch any Claude orb whose session isn't running, resuming its own conversation.
     func revive() {
-        for e in entries where e.kind == "claude" && e.closed != true && !(e.name == "voice" && e.id.isEmpty) {
+        for e in entries where e.kind == "claude" && e.closed != true && !e.id.isEmpty {
             guard runStatus("/opt/homebrew/bin/tmux", ["has-session", "-t", e.name]) != 0 else {
                 reviveBackoff[e.name] = nil; continue                    // running fine
             }
@@ -353,7 +351,7 @@ final class SessionsController: NSObject {
             m.addItem(item(codex.s.auto ? "✓ Codex auto mode" : "Codex auto mode", #selector(codexAuto)))
         }
         m.addItem(.separator())
-        m.addItem(item(name == "voice" ? "Close session (the default orb stays)" : "Close session", #selector(close(_:)), name))
+        m.addItem(item("Close session", #selector(close(_:)), name))
         m.addItem(.separator())
         app?.addGeneralItems(to: m)                                  // auto mode, notes, tunnel, OS mode… as before
         return m
@@ -386,7 +384,42 @@ final class SessionsController: NSObject {
 
     // MARK: actions
 
+    // MARK: drag an orb along the dock to reorder (saved; hotkey defaults follow the position)
+
+    private var dragFrames: [String: NSRect] = [:]
+
+    func drag(_ name: String, _ phase: Int, _ p: NSPoint) {
+        guard let dock else { return }
+        switch phase {
+        case 0:
+            dock.draggingId = name
+            dragFrames = Dictionary(uniqueKeysWithValues: entries.compactMap { e in
+                OrbAnchors.shared.screenRect(e.name).map { (e.name, $0) } })      // slots as they were
+        case 1:
+            let others = entries.map(\.name).filter { $0 != name }
+            let slots = entries.compactMap { dragFrames[$0.name]?.midX }.sorted()
+            guard !slots.isEmpty else { return }
+            let target = slots.filter { $0 < p.x }.count                          // which slot the cursor is over
+            var order = others
+            order.insert(name, at: min(max(target, 0), order.count))
+            if order != entries.map(\.name) {
+                let byName = Dictionary(uniqueKeysWithValues: entries.map { ($0.name, $0) })
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) {
+                    entries = order.compactMap { byName[$0] }
+                    dock.orbIds = order
+                }
+            }
+        default:
+            dock.draggingId = nil
+            dragFrames = [:]
+            save()
+        }
+    }
+
     let typeBox = TypeBox()
+
+    /// The first orb in the dock: the corner orb acts for it outside OS mode.
+    var firstName: String? { entries.first?.name }
 
     /// Click an orb: a small field opens above it to type a message to that session.
     func openTyping(_ name: String) {
@@ -407,8 +440,9 @@ final class SessionsController: NSObject {
         return "\(base)-\(i)"
     }
 
-    @objc func newClaude() { startClaude(nextName("voice"), ["--fresh"]) }
-    @objc func newClaudeInFolder() { if let f = pickFolder("New Claude voice session in folder") { startClaude(nextName("voice"), ["--fresh", "--cwd", f]) } }
+    private func newClaudeName() -> String { entries.contains { $0.name == "voice" } ? nextName("voice") : "voice" }
+    @objc func newClaude() { startClaude(newClaudeName(), ["--fresh"]) }
+    @objc func newClaudeInFolder() { if let f = pickFolder("New Claude voice session in folder") { startClaude(newClaudeName(), ["--fresh", "--cwd", f]) } }
 
     private func startClaude(_ name: String, _ args: [String]) {
         DispatchQueue.global().async {
@@ -491,13 +525,9 @@ final class SessionsController: NSObject {
         guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
         if e.kind == "claude" { post5123("/claude/quit?s=\(n)", [:]) }
         if e.kind == "codex", codex.s.thread_id == e.id { codexPost("/stop", [:]) }
-        if n == "voice" {
-            if let i = entries.firstIndex(where: { $0.name == "voice" }) { entries[i].id = ""; entries[i].closed = true }
-        } else {
-            entries.removeAll { $0.name == n }
-        }
+        entries.removeAll { $0.name == n }                            // every orb is removable
         save()
-        if main.s.target == n { select("voice") }
+        if main.s.target == n, let first = entries.first { select(first.name) }
     }
 
     private func pickFolder(_ title: String) -> String? {

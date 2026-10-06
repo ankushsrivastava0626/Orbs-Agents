@@ -77,6 +77,7 @@ final class Model: ObservableObject {
     @Published var online = false
     @Published var hovering = false
     @Published var bubblePeek = false            // hovering shows the last reply bubble instead of the info card
+    var cornerSession = ""                       // the orb the corner orb stands for (your first orb)
     var orbFrames: () -> [NSRect] = { [] }
     private var timer: Timer?
 
@@ -232,7 +233,7 @@ struct Orb: View {
     var body: some View {
         OrbFace(mode: m.mode, level: m.s.level, outLevel: m.s.out_level, auto: m.s.auto, notes: m.s.notes,
                 ripple: m.flying != nil, problem: m.problem, idleColor: m.idleColor,
-                muted: m.s.muted_sessions.contains("voice"))
+                muted: m.s.muted_sessions.contains(m.cornerSession))
     }
 }
 
@@ -562,7 +563,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // open an orb's typing field from scripts (also used to test it):  object = session name
         DistributedNotificationCenter.default().addObserver(forName: .init("com.claude.voicepet.type"),
                                                             object: nil, queue: .main) { [weak self] n in
-            self?.sessions.openTyping((n.object as? String) ?? "voice")
+            guard let self else { return }
+            if let n = (n.object as? String) ?? self.sessions.firstName { self.sessions.openTyping(n) }
         }
         // toggle tunnel vision from scripts/hotkeys:  ~/.claude/voice/tunnel [on|off]
         DistributedNotificationCenter.default().addObserver(forName: .init("com.claude.voicepet.tunnel"),
@@ -693,11 +695,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bubble(for: name).0.add("codex-\(cm.muted_at)", title: sessions.displayName(name), text: cm.muted_text)
         }
         for s in bubbles.keys where !(bubbles[s]?.0.cards.isEmpty ?? true) { placeBubble(s) }   // follow the dock
+        model.cornerSession = sessions.firstName ?? ""
         let h = model.hovering && !osMode.on
         if h != cornerHover {
             cornerHover = h
-            model.bubblePeek = h && bubbles["voice"]?.0.last != nil
-            peekBubble("voice", h)
+            let first = sessions.firstName ?? ""
+            model.bubblePeek = h && bubbles[first]?.0.last != nil
+            peekBubble(first, h)
         }
     }
 
@@ -1011,12 +1015,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func showMenu(in view: NSView, at point: NSPoint) {
-        let menu = NSMenu()
-        addSessionItems(to: menu)
-        sessions.hotkeyItems(for: "voice", into: menu)
-        menu.addItem(.separator())
-        addGeneralItems(to: menu)
-        menu.popUp(positioning: nil, at: point, in: view)
+        // the corner orb's menu is your first orb's menu (plus ＋ to start one when there are none)
+        if let first = sessions.firstName {
+            sessions.orbMenu(first).popUp(positioning: nil, at: point, in: view)
+        } else {
+            let menu = sessions.plusMenu()
+            menu.addItem(.separator())
+            addGeneralItems(to: menu)
+            menu.popUp(positioning: nil, at: point, in: view)
+        }
     }
 
     /// The pet's own options (stop, OS mode, tunnel vision, auto, notes…), shown on every orb's menu.
@@ -1075,7 +1082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             host.onClick = { [weak self] in
                 guard let self else { return }
                 if !self.tunnelPanels.isEmpty { self.setTunnel(false); return }   // in tunnel vision a click exits it
-                self.sessions.openTyping("voice")                                   // otherwise: type to Claude
+                if let first = self.sessions.firstName { self.sessions.openTyping(first) }   // type to your first orb
             }
             host.onMenu = { [weak self, weak host] event in
                 guard let self, let host else { return }

@@ -50,8 +50,9 @@ old = next((o for o in orbs if o.get("name") == name), {})
 entry = {"name": name, "kind": "claude", "id": sid, "cwd": cwd}
 if "hotkey" in old: entry["hotkey"] = old["hotkey"]          # keep the orb's speak hotkey
 if "label" in old: entry["label"] = old["label"]
-orbs = [o for o in orbs if o.get("name") != name] + [entry]
-orbs.sort(key=lambda o: o["name"] != "voice")              # default orb first; others keep their order
+i = next((k for k, o in enumerate(orbs) if o.get("name") == name), None)
+if i is None: orbs.append(entry)                            # new orb goes at the end
+else: orbs[i] = entry                                       # relaunch/resume: keep its place in the dock
 json.dump(orbs, open(op, "w"), indent=1)
 p = os.path.join(v, "sessions.json")
 try: lst = json.load(open(p))
