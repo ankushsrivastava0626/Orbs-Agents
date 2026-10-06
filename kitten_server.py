@@ -456,14 +456,52 @@ def finish_note(nid, text, save):
         STATUS["saved_note"] = {"id": nid, "text": final, "at": time.time()}
     return True
 
+_gate_vad = None
+_gate_lock = threading.Lock()
+NOISE = {"you", "thank you", "thanks", "uh", "um", "hmm", "mm", "ah", "oh", "yeah", "okay", "ok", "bye", "the", "a"}
+
+def speech_seconds(path):
+    """How much real speech is in a recording (Silero VAD, the same detector auto mode uses)."""
+    global _gate_vad
+    import torch, soundfile as sf
+    audio, sr = sf.read(path, dtype="float32")
+    if audio.ndim > 1: audio = audio[:, 0]
+    with _gate_lock:
+        if _gate_vad is None:
+            from silero_vad import load_silero_vad
+            _gate_vad = load_silero_vad()
+        _gate_vad.reset_states()
+        n, voiced = 512, 0
+        for i in range(0, len(audio) - n + 1, n):
+            if _gate_vad(torch.from_numpy(audio[i:i + n].copy()), sr).item() > 0.5:
+                voiced += 1
+    return voiced * n / sr
+
+def is_noise(text):
+    t = re.sub(r"[^a-z ]", "", text.lower()).strip()
+    return not t or t in NOISE
+
 def deliver(path):
-    """Transcribe a recorded utterance and send it to the voice session."""
+    """Transcribe a recorded utterance and send it to its session — but only if you actually said something:
+    silence, a cough or a breath is dropped before anything is sent (so nothing gets started by accident)."""
+    try:
+        voiced = speech_seconds(path)
+    except Exception as e:
+        print("speech check failed:", repr(e), flush=True); voiced = 1.0
+    if voiced < 0.35:
+        print(f"dropped: no speech ({voiced:.2f}s voiced)", flush=True)
+        try: os.unlink(path)
+        except OSError: pass
+        return ""
     STATUS["transcribing"] = True
     try:
         text = transcribe(path)
     finally:
         STATUS["transcribing"] = False
         os.unlink(path)
+    if is_noise(text):
+        if text: print("dropped: noise transcript:", repr(text), flush=True)
+        return ""
     if len(text.split()) >= 1:
         if STATUS["notes"]:
             propose_note(text)
@@ -620,8 +658,6 @@ def command_watch():
                 print("mic error:", e, flush=True); stream = None
                 if is_audio_error(e): refresh_audio()
         elif down and now - held_since >= 0.35:
-            if not STATUS["listening"] and not STATUS["notes"] and STATUS.get("target", "voice") == "voice":   # boot if needed
-                threading.Thread(target=ensure_voice_session, daemon=True).start()
             gen += 1                       # a real hold: shut up and drop the queue
             abort_all()
             STATUS["listening"] = True
