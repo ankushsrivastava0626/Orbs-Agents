@@ -304,7 +304,12 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/ptt":              # pet: an orb's speak hotkey went down/up {"name","kind","down"}
             try:
                 ev = json.loads(body)
+                if ev.get("cancel"):              # it was a tap or a shortcut (Ctrl-C…), not a hold to talk
+                    PTT.update(cancel=True, down=False)
+                    if PTT.get("prev"): STATUS.update(target=PTT["prev"][0], target_kind=PTT["prev"][1])
+                    self._ok(); return
                 if ev.get("down"):
+                    PTT.update(cancel=False, prev=(STATUS.get("target"), STATUS.get("target_kind")))
                     STATUS.update(target=ev.get("name", "voice"), target_kind=ev.get("kind", "claude"))
                     st = STATUS["sessions"].get(STATUS["target"], {})
                     STATUS.update(voice_claude=st.get("state", "idle"), voice_claude_at=st.get("at", 0))
@@ -387,10 +392,28 @@ def ensure_voice_session():
 
 CODEX_ROOT = "/Users/kush/Documents/Codex/2026-10-04/can-x20/outputs/codex-voice-assistant"
 
+def codex_use_orb(token):
+    """Several Codex orbs share one Codex server, which holds one conversation at a time: switch it to the
+    conversation of the orb you're talking to before sending."""
+    import urllib.request
+    try:
+        orbs = json.load(open(os.path.join(DIR, "orbs.json")))
+        want = next((o.get("id") for o in orbs if o.get("name") == STATUS.get("target")), None)
+        if not want: return
+        h = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+        cur = json.load(urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:5124/status", headers=h), timeout=3))
+        if cur.get("thread_id") != want:
+            urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:5124/sessions/resume",
+                                   data=json.dumps({"session": want}).encode(), headers=h), timeout=20)
+            print("codex: switched to", STATUS.get("target"), want, flush=True)
+    except Exception as e:
+        print("codex switch failed:", repr(e), flush=True)
+
 def send_to_codex(text):
     import urllib.request
     try:
         token = open(os.path.join(CODEX_ROOT, "runtime/token")).read().strip()
+        codex_use_orb(token)
         req = urllib.request.Request("http://127.0.0.1:5124/input", data=json.dumps({"text": text}).encode(),
                                      headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=3)
@@ -669,7 +692,9 @@ def command_watch():
                 try: stream.stop(); stream.close()
                 except Exception: pass
                 stream = None
-            if held >= 0.6 and chunks:     # quick Option+key presses (special chars, Option+arrows) are ignored
+            cancelled = PTT.pop("cancel", False)
+            if cancelled: print("ptt: cancelled (tap or shortcut)", flush=True)
+            if held >= 0.6 and chunks and not cancelled:     # quick Option+key presses (special chars, Option+arrows) are ignored
                 audio = np.concatenate(chunks)[:, 0]
                 f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
                 sf.write(f.name, audio, 16000)

@@ -171,7 +171,7 @@ final class SessionsController: NSObject {
 
     private var capturing: String? = nil            // orb waiting for "press the key you want"
     private var capturePanel: NSPanel?
-    private var held: (code: Int, name: String)? = nil
+    private var held: (code: Int, name: String, downEvent: CGEvent?, live: Bool)? = nil
     private var keyTap: CFMachPort?
 
     func hotkeyItems(for name: String, into m: NSMenu) {
@@ -261,7 +261,7 @@ final class SessionsController: NSObject {
         } else {
             down = type == .keyDown
             if type == .keyDown && e.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
-                return held?.code == code                               // swallow key-repeat of a held hotkey
+                return held?.code == code && held?.downEvent != nil     // swallow key-repeat of a held normal hotkey
             }
         }
         if capturing != nil {                                           // assigning a new hotkey
@@ -275,18 +275,49 @@ final class SessionsController: NSObject {
             DispatchQueue.main.async { self.finishCapture(key) }
             return true
         }
+        if e.getIntegerValueField(.eventSourceUserData) == Self.replayMark { return false }   // our own replayed key
+        // Another key while a hotkey is down: it's a shortcut (Ctrl-C) or typing, not talking.
+        if type == .keyDown, let h = held, h.code != code, !h.live || h.downEvent == nil {   // (a held modifier + key is always a shortcut)
+            held = nil
+            post5123("/ptt", ["cancel": "1"])
+            if let d = h.downEvent {                                     // a normal key we held back: type it, then this one
+                replay(d); replay(e); return true
+            }
+            return false
+        }
         if down, held == nil, let e2 = entries.first(where: { hotkey(for: $0)?.code == code }) {
             if type == .flagsChanged, flags & 0x1E0000 & ~Self.ownMask(code) != 0 { return false }  // part of a chord
-            held = (code, e2.name)
-            DispatchQueue.main.async { self.post5123("/ptt", ["name": e2.name, "kind": e2.kind, "down": "1"]) }
-            return type != .flagsChanged
+            let modifier = type == .flagsChanged
+            held = (code, e2.name, modifier ? nil : e.copy(), false)
+            // start the mic now (so the first word isn't clipped); it only counts as talking once held a moment
+            post5123("/ptt", ["name": e2.name, "kind": e2.kind, "down": "1"])
+            let stamp = code
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdDelay) { [weak self] in
+                if let self, let h = self.held, h.code == stamp { self.held?.live = true }
+            }
+            return !modifier                                            // a normal key is held back until we know
         }
         if !down, let h = held, h.code == code {
             held = nil
-            DispatchQueue.main.async { self.post5123("/ptt", ["name": h.name, "down": ""]) }
+            if h.live {
+                post5123("/ptt", ["name": h.name, "down": ""])
+            } else {                                                    // a tap: the key keeps its normal job
+                post5123("/ptt", ["cancel": "1"])
+                if let d = h.downEvent { replay(d); replay(e) }
+            }
             return type != .flagsChanged
         }
-        return type != .flagsChanged && held?.code == code
+        return type != .flagsChanged && held?.code == code              // swallow repeats of a held normal key
+    }
+
+    private static let holdDelay = 0.3
+    private static let replayMark: Int64 = 0x564F4943                   // "VOIC"
+
+    /// Re-send a key event we held back, marked so our own tap lets it through.
+    private func replay(_ ev: CGEvent) {
+        guard let c = ev.copy() else { return }
+        c.setIntegerValueField(.eventSourceUserData, value: Self.replayMark)
+        c.post(tap: .cgSessionEventTap)
     }
 
     /// The generic modifier mask a modifier key itself sets (so we only treat *other* modifiers as a chord).
