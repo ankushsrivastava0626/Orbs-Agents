@@ -556,6 +556,21 @@ final class OSMode {
             self.powerMenu().popUp(positioning: nil, at: pt, in: v)
             self.barMenuOpen = false
         }
+        bar.onWifi = { [weak self] v, pt in
+            guard let self else { return }
+            self.barMenuOpen = true
+            WiFi.shared.menu().popUp(positioning: nil, at: pt, in: v)
+            self.barMenuOpen = false
+        }
+        bar.onBluetooth = { [weak self] v, pt in
+            guard let self else { return }
+            self.barMenuOpen = true
+            Bluetooth.shared.menu().popUp(positioning: nil, at: pt, in: v)
+            self.barMenuOpen = false
+        }
+        WiFi.shared.onChange = { [weak self] in self?.readRadios() }
+        Bluetooth.shared.onChange = { [weak self] in self?.readRadios() }
+        WiFi.shared.refresh()
         bar.onNotes = { [weak self] in self?.toggleNotes?() }
         bar.onAuto = { [weak self] in self?.toggleAuto?() }
         bar.onTunnel = { [weak self] in self?.toggleTunnel?() }
@@ -643,13 +658,21 @@ final class OSMode {
         barTick += 1
         if barTick % 25 == 1 {                                  // every ~5 s: battery and Wi-Fi
             if let (b, c) = SystemInfo.battery() { bar.battery = b; bar.charging = c }
-            bar.wifiOn = SystemInfo.wifiOn()
+            readRadios()
         }
     }
 
     @objc private func powerExit() { stop() }
     @objc private func powerLock() { _ = shell("/usr/bin/pmset", "displaysleepnow") }
     @objc private func powerSleep() { _ = shell("/usr/bin/pmset", "sleepnow") }
+
+    private func readRadios() {
+        let w = WiFi.shared, b = Bluetooth.shared
+        bar.wifiOn = w.on; bar.wifiConnected = w.connected; bar.wifiStrength = w.strength
+        let btOn = b.on
+        bar.btOn = btOn; bar.btConnected = btOn && b.anyConnected
+        w.refresh()
+    }
 
     private func powerMenu() -> NSMenu {
         let m = NSMenu()

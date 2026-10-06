@@ -19,6 +19,12 @@ final class MenuBarModel: ObservableObject {
     @Published var battery: Int? = nil
     @Published var charging = false
     @Published var wifiOn = false
+    @Published var wifiConnected = false
+    @Published var wifiStrength = 0.0
+    @Published var btOn = false
+    @Published var btConnected = false
+    var onWifi: ((NSView, CGPoint) -> Void)?
+    var onBluetooth: ((NSView, CGPoint) -> Void)?
     @Published var now = Date()
     @Published var shown = false            // drives the reveal animation (same spring as the dial)
     @Published var appMode = false          // the front app's box fills the screen: show that app's own bar
@@ -97,6 +103,7 @@ struct MenuBarView: View {
                     .foregroundColor(.white.opacity(0.65)).lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: m.rightWidth - 260, alignment: .trailing)
                     .modifier(stagger(1))
+                connectivity.modifier(stagger(2))
                 Text(m.now, format: .dateTime.weekday(.abbreviated).hour().minute())
                     .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white).monospacedDigit()
                     .modifier(stagger(2))
@@ -144,14 +151,7 @@ struct MenuBarView: View {
                 toggle("note.text", on: m.notes, help: "Notes mode") { m.onNotes?() }
                 toggle("waveform", on: m.auto, help: "Auto mode (hands-free)") { m.onAuto?() }
                 toggle("flashlight.on.fill", on: m.tunnel, help: "Tunnel vision") { m.onTunnel?() }
-                Image(systemName: m.wifiOn ? "wifi" : "wifi.slash").font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.85))
-                if let b = m.battery {
-                    HStack(spacing: 3) {
-                        Text("\(b)%").font(.system(size: 11, weight: .medium, design: .rounded)).monospacedDigit()
-                        Image(systemName: m.charging ? "battery.100.bolt" : batterySymbol(b)).font(.system(size: 13))
-                    }.foregroundColor(b <= 15 && !m.charging ? .red : .white.opacity(0.85))
-                }
+                connectivity
                 Text(m.now, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
                     .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white).monospacedDigit()
                 Image(systemName: "power").font(.system(size: 12, weight: .bold)).foregroundColor(.white.opacity(0.85))
@@ -164,6 +164,35 @@ struct MenuBarView: View {
             .frame(width: m.rightWidth, alignment: .trailing)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Wi-Fi and Bluetooth (click for their menus), then battery. Shown in both bars.
+    var connectivity: some View {
+        HStack(spacing: 12) {
+            Image(systemName: !m.wifiOn ? "wifi.slash" : (m.wifiConnected ? "wifi" : "wifi.exclamationmark"),
+                  variableValue: m.wifiConnected ? m.wifiStrength : nil)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white.opacity(m.wifiOn ? 0.9 : 0.5))
+                .frame(width: 22, height: 22).contentShape(Rectangle())
+                .overlay(AnchorReader { v, p in m.onWifi?(v, p) })
+                .help("Wi-Fi")
+            BluetoothGlyph()
+                .stroke(Color.white.opacity(m.btOn ? (m.btConnected ? 1 : 0.85) : 0.4),
+                        style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                .frame(width: 7, height: 13)
+                .overlay(alignment: .bottomTrailing) {
+                    if !m.btOn { Rectangle().fill(Color.white.opacity(0.6)).frame(width: 14, height: 1.3).rotationEffect(.degrees(-55)).offset(x: 3.5, y: -6) }
+                }
+                .frame(width: 22, height: 22).contentShape(Rectangle())
+                .overlay(AnchorReader { v, p in m.onBluetooth?(v, p) })
+                .help("Bluetooth")
+            if let b = m.battery {
+                HStack(spacing: 3) {
+                    Text("\(b)%").font(.system(size: 11, weight: .medium, design: .rounded)).monospacedDigit()
+                    Image(systemName: m.charging ? "battery.100.bolt" : batterySymbol(b)).font(.system(size: 13))
+                }.foregroundColor(b <= 15 && !m.charging ? .red : .white.opacity(0.85))
+            }
+        }
     }
 
     func toggle(_ symbol: String, on: Bool, help: String, _ action: @escaping () -> Void) -> some View {
@@ -188,6 +217,21 @@ struct Stagger: ViewModifier {
     }
 }
 
+/// The Bluetooth rune.
+struct BluetoothGlyph: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let w = r.width, h = r.height
+        p.move(to: CGPoint(x: r.minX, y: r.minY + h * 0.27))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + h * 0.73))
+        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.minX + w * 0.5, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + h * 0.27))
+        p.addLine(to: CGPoint(x: r.minX, y: r.minY + h * 0.73))
+        return p
+    }
+}
+
 final class MenuBarHost<V: View>: NSHostingView<V> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
@@ -208,7 +252,7 @@ enum SystemInfo {
         return nil
     }
 
-    static func wifiOn() -> Bool { CWWiFiClient.shared().interface()?.powerOn() ?? false }
+    static func wifiOn() -> Bool { WiFi.shared.on }
 }
 
 // MARK: - the frontmost app's real menus, rebuilt as an NSMenu from Accessibility

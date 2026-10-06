@@ -17,5 +17,11 @@
 	</dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>OS mode hides the Dock and menu bar while it is on, and restores them afterwards.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>OS mode lists your Bluetooth devices in its menu bar so you can connect or disconnect them.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>OS mode shows Wi-Fi network names in its menu bar so you can switch networks.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>OS mode shows Wi-Fi network names in its menu bar so you can switch networks.</string>
 </dict>
 </plist>
