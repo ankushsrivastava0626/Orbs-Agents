@@ -1111,7 +1111,10 @@ final class OSMode {
         let f = (NSScreen.main ?? NSScreen.screens[0]).frame
         var siblings = boxes.filter { $0.pid == pid }.count
         var target: CGRect
-        if let pf = pendingFrame.removeValue(forKey: pid) {          // replacing a window: same spot, same size
+        let isFinder = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.apple.finder"
+        if isFinder, let own = frameOf(win) {                        // Finder keeps its own size and every view
+            target = own; siblings = 0
+        } else if let pf = pendingFrame.removeValue(forKey: pid) {   // replacing a window: same spot, same size
             target = pf; siblings = 0
         } else if let saved = savedBox(pid), saved.intersects(f) {
             target = saved
@@ -1133,8 +1136,9 @@ final class OSMode {
             AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXManualAccessibility" as CFString, kCFBooleanTrue)
         }
         boxes.append(box)
-        setFrame(win, target)
-        for d in [0.3, 0.7, 1.2, 1.7] {                              // apps restore their own size while launching
+        if isFinder { box.settleUntil = Date() }                     // don't force a frame on Finder
+        else { setFrame(win, target) }
+        for d in [0.3, 0.7, 1.2, 1.7] where !isFinder {                              // apps restore their own size while launching
             DispatchQueue.main.asyncAfter(deadline: .now() + d) { [weak self, weak box] in
                 guard let self, let box, Date() < box.settleUntil.addingTimeInterval(0.2) else { return }
                 self.setFrame(win, box.target)
@@ -1142,7 +1146,7 @@ final class OSMode {
         }
         box.frame = target
         log("box for pid \(pid): \(Int(target.width))x\(Int(target.height)) (window \(siblings + 1) of this app)")
-        if siblings == 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.declutter(pid) } }
+        if siblings == 0, !isFinder { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.declutter(pid) } }
         refreshCanvas()
     }
 

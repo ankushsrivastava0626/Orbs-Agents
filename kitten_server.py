@@ -681,10 +681,11 @@ def command_watch():
                 print("mic error:", e, flush=True); stream = None
                 if is_audio_error(e): refresh_audio()
         elif down and now - held_since >= 0.35:
-            gen += 1                       # a real hold: shut up and drop the queue
-            abort_all()
+            # a real hold: keep the reply playing, just quieter while you talk (nothing is cut off or dropped)
+            gemini_voice.GAIN[0] = 0.2
             STATUS["listening"] = True
         elif not down and held_since is not None:
+            gemini_voice.GAIN[0] = 1.0
             held = now - held_since
             held_since = None
             STATUS.update(listening=False, level=0.0)
