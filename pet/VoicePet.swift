@@ -615,7 +615,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hoverWork[session]?.cancel()
         guard let (m, _) = bubbles[session] else { return }
         if on {
-            let w = DispatchWorkItem { [weak self] in self?.placeBubble(session); m.peek(true) }
+            let w = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                for (other, (om, _)) in self.bubbles where other != session { om.dismissPeeks() }   // one hover bubble at a time
+                self.placeBubble(session); m.peek(true)
+            }
             hoverWork[session] = w
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: w)
         } else {

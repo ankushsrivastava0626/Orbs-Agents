@@ -72,6 +72,12 @@ final class CaptionsModel: ObservableObject {
     /// Seed with what already happened so old replies don't pop up when the pet starts.
     func markSeen(_ ids: [String]) { ids.forEach { seen.insert($0) } }
 
+    /// Fade just the hover-revealed bubble (another orb's hover bubble is taking over).
+    func dismissPeeks() {
+        peeking = false; hovering = false
+        cards.filter { $0.id.hasPrefix("peek-") }.map(\.id).forEach(dismiss)
+    }
+
     /// Fade every bubble of this orb (typing field opened, or a click outside).
     func dismissAll() {
         peeking = false; hovering = false
