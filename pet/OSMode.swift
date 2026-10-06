@@ -1147,6 +1147,7 @@ final class OSMode {
         box.frame = target
         log("box for pid \(pid): \(Int(target.width))x\(Int(target.height)) (window \(siblings + 1) of this app)")
         if siblings == 0, !isFinder { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.declutter(pid) } }
+        if isFinder { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showFinderViews(pid) } }
         refreshCanvas()
     }
 
@@ -1176,16 +1177,7 @@ final class OSMode {
         for box in boxes {
             let app = NSRunningApplication(processIdentifier: box.pid)
             guard app?.isHidden == false, !isMinimized(box.win) else { box.frame = nil; continue }
-            let fs = isFullScreen(box.win)
-            if !fs, Date() > box.busyUntil { box.armed = true }            // seen out of fullscreen: next press counts
-            if fs, Date() > box.busyUntil, box.armed, Date().timeIntervalSince(box.lastToggle) > 2 {
-                box.armed = false; box.lastToggle = Date()
-                // green button: don't leave the canvas for a fullscreen Space; make the box fill the screen
-                // instead (still a window). Pressing it again puts the box back to its size.
-                AXUIElementSetAttributeValue(box.win, "AXFullScreen" as CFString, kCFBooleanFalse)
-                toggleFill(box)
-                continue
-            }
+            if isFullScreen(box.win) { box.frame = nil; continue }    // real macOS fullscreen: leave it alone
             if Date() < box.busyUntil { continue }
             guard let r = frameOf(box.win) else { continue }
             box.frame = r
@@ -1221,12 +1213,6 @@ final class OSMode {
                 if let f = os.dialPanel?.frame, !os.dialHit(p, in: f) { DispatchQueue.main.async { os.hideDial() } }
             }
             if type == .leftMouseUp, os.swallowNextUp { os.swallowNextUp = false; return nil }
-            if type == .leftMouseDown, let box = os.boxGreenButton(at: event.location) {
-                // green button: fill the screen ourselves (no native fullscreen, so nothing to fight)
-                os.swallowNextUp = true
-                DispatchQueue.main.async { box.lastToggle = Date(); os.toggleFill(box) }
-                return nil
-            }
             guard type == .leftMouseDown, event.getIntegerValueField(.mouseEventClickState) == 2 else {
                 return Unmanaged.passUnretained(event)
             }
@@ -1603,6 +1589,19 @@ final class OSMode {
         }
         let titles = menuItems(app).compactMap { attr($0, kAXTitleAttribute) as? String }.filter { $0.hasPrefix("Hide") || $0.hasPrefix("Show") }
         log("declutter pid \(pid): hid \(n); hide/show items seen: \(titles.prefix(12))")
+    }
+
+    /// Finder in full: bring back the toolbar, sidebar, path bar and status bar (hidden by an older OS mode).
+    private func showFinderViews(_ pid: pid_t) {
+        let app = AXUIElementCreateApplication(pid)
+        for want in ["Show Toolbar", "Show Sidebar", "Show Path Bar", "Show Status Bar"] {
+            for item in menuItems(app) where (attr(item, kAXTitleAttribute) as? String) == want
+                                           && (attr(item, kAXEnabledAttribute) as? Bool) == true {
+                AXUIElementPerformAction(item, kAXPressAction as CFString)
+                log("finder: \(want)")
+                break
+            }
+        }
     }
 
     private func undoDeclutter() {

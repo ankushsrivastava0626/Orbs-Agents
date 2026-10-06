@@ -1,6 +1,7 @@
 // Wi-Fi and Bluetooth for the OS mode menu bar: their state for the icons, and the menus you get
 // by clicking them (turn on/off, connect/disconnect, switch network or device).
 import AppKit
+import CoreAudio
 import CoreLocation
 import CoreWLAN
 import IOBluetooth
@@ -197,5 +198,47 @@ final class Bluetooth {
         m.addItem(.separator())
         m.addItem(ActionItem("Bluetooth Settings…") { openSettings("BluetoothSettings") })
         return m
+    }
+}
+
+// MARK: - Speakers: silence the Mac while you hold a talk key, so the mic hears only you
+
+enum SpeakerMute {
+    private static var mutedByUs = false
+
+    /// True when sound is coming out of the Mac's own speakers (not headphones, AirPods, a display…).
+    static var onBuiltInSpeakers: Bool {
+        var dev = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var a = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                           mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &dev) == noErr else { return false }
+        var transport = UInt32(0); size = UInt32(MemoryLayout<UInt32>.size)
+        a.mSelector = kAudioDevicePropertyTransportType
+        guard AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &transport) == noErr,
+              transport == kAudioDeviceTransportTypeBuiltIn else { return false }
+        // built-in output with headphones plugged into the jack reports a "headphones" data source
+        var source = UInt32(0); size = UInt32(MemoryLayout<UInt32>.size)
+        a.mSelector = kAudioDevicePropertyDataSource; a.mScope = kAudioDevicePropertyScopeOutput
+        if AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &source) == noErr, source == 0x6864706E { return false }   // 'hdpn'
+        return true
+    }
+
+    private static func run(_ s: String) -> NSAppleEventDescriptor? {
+        var err: NSDictionary?
+        return NSAppleScript(source: s)?.executeAndReturnError(&err)
+    }
+
+    static func begin() {
+        guard !mutedByUs, onBuiltInSpeakers else { return }
+        let already = run("output muted of (get volume settings)")?.booleanValue ?? false
+        guard !already else { return }                 // you muted it yourself: leave it that way
+        _ = run("set volume with output muted")
+        mutedByUs = true
+    }
+
+    static func end() {
+        guard mutedByUs else { return }
+        mutedByUs = false
+        _ = run("set volume without output muted")
     }
 }

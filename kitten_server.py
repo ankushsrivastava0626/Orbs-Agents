@@ -432,6 +432,11 @@ def send_to_claude(text):
     elif not ensure_voice_session():
         STATUS["problem_at"] = time.time()
         return
+    st = STATUS["sessions"].get(target, {})
+    if st.get("state") == "working" and time.time() - st.get("at", 0) < 1800:
+        subprocess.run([TMUX, "send-keys", "-t", target, "Escape"])   # a new command interrupts the running task
+        time.sleep(0.6)
+        print("interrupted", target, "for a new command", flush=True)
     subprocess.run([TMUX, "send-keys", "-t", target, "-l", text])
     subprocess.run([TMUX, "send-keys", "-t", target, "Enter"])
     print("sent:", text, "->", target, flush=True)
@@ -681,11 +686,11 @@ def command_watch():
                 print("mic error:", e, flush=True); stream = None
                 if is_audio_error(e): refresh_audio()
         elif down and now - held_since >= 0.35:
-            # a real hold: keep the reply playing, just quieter while you talk (nothing is cut off or dropped)
-            gemini_voice.GAIN[0] = 0.2
+            if not STATUS["listening"]:
+                gen += 1                   # a real hold: Joe stops and his queue is dropped
+                abort_all()
             STATUS["listening"] = True
         elif not down and held_since is not None:
-            gemini_voice.GAIN[0] = 1.0
             held = now - held_since
             held_since = None
             STATUS.update(listening=False, level=0.0)

@@ -279,6 +279,7 @@ final class SessionsController: NSObject {
         // Another key while a hotkey is down: it's a shortcut (Ctrl-C) or typing, not talking.
         if type == .keyDown, let h = held, h.code != code, !h.live || h.downEvent == nil {   // (a held modifier + key is always a shortcut)
             held = nil
+            SpeakerMute.end()
             post5123("/ptt", ["cancel": "1"])
             if let d = h.downEvent {                                     // a normal key we held back: type it, then this one
                 replay(d); replay(e); return true
@@ -293,12 +294,13 @@ final class SessionsController: NSObject {
             post5123("/ptt", ["name": e2.name, "kind": e2.kind, "down": "1"])
             let stamp = code
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdDelay) { [weak self] in
-                if let self, let h = self.held, h.code == stamp { self.held?.live = true }
+                if let self, let h = self.held, h.code == stamp { self.held?.live = true; SpeakerMute.begin() }
             }
             return !modifier                                            // a normal key is held back until we know
         }
         if !down, let h = held, h.code == code {
             held = nil
+            SpeakerMute.end()
             if h.live {
                 post5123("/ptt", ["name": h.name, "down": ""])
             } else {                                                    // a tap: the key keeps its normal job

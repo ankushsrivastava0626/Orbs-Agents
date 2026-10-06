@@ -104,8 +104,6 @@ class GeminiVoice:
 LEVEL_CB = None   # set by the server: receives output loudness 0..1 so the pet can pulse with the voice
 
 
-GAIN = [1.0]       # lowered while you hold a talk key, so your mic hears you over the speakers
-
 class Player:
     """Streams 24kHz int16 PCM chunks to the speakers, sped up with pitch kept (WSOLA)."""
     BLOCK = 2400   # 0.1s per write, so a stop takes effect quickly
@@ -132,7 +130,7 @@ class Player:
             block = np.ascontiguousarray(out[i:i + self.BLOCK])
             if LEVEL_CB:
                 LEVEL_CB(min(1.0, float(np.sqrt(np.mean(block ** 2))) * 6))
-            self.stream.write(block * GAIN[0])
+            self.stream.write(block)
 
     def stop(self):
         self.stopped = True
