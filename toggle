@@ -1,0 +1,4 @@
+#!/bin/bash
+# Turn voice on/off globally.
+F="$HOME/.claude/voice/off"
+if [ -f "$F" ]; then rm "$F"; echo "voice ON"; else touch "$F"; "$HOME/.claude/voice/mute"; echo "voice OFF"; fi

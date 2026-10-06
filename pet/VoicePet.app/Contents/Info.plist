@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>VoicePet</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.claude.voice-pet</string>
+	<key>CFBundleName</key>
+	<string>VoicePet</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>OS mode hides the Dock and menu bar while it is on, and restores them afterwards.</string>
+</dict>
+</plist>

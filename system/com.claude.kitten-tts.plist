@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.claude.kitten-tts</string>
+  <key>ProgramArguments</key><array>
+    <string>/Users/kush/.claude/voice/kitten-venv/bin/python</string>
+    <string>/Users/kush/.claude/voice/kitten_server.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key><dict><key>HF_HUB_DISABLE_TELEMETRY</key><string>1</string><key>PATH</key><string>/usr/bin:/bin</string></dict>
+  <key>StandardOutPath</key><string>/tmp/kitten-tts.log</string>
+  <key>StandardErrorPath</key><string>/tmp/kitten-tts.log</string>
+</dict></plist>

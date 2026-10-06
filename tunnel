@@ -1,0 +1,11 @@
+#!/bin/bash
+# Toggle the pet's tunnel vision:  tunnel [on|off]   (no argument = toggle)
+ARG="${1:-}"
+osascript -l JavaScript - "$ARG" <<'JS' >/dev/null
+ObjC.import('Foundation');
+function run(argv) {
+  var obj = argv[0] ? $(argv[0]) : $();
+  $.NSDistributedNotificationCenter.defaultCenter
+    .postNotificationNameObjectUserInfoDeliverImmediately('com.claude.voicepet.tunnel', obj, $(), true);
+}
+JS

@@ -1,0 +1,578 @@
+// Voice sessions as orbs. One default Claude orb ("voice"), plus as many Claude or Codex sessions as you
+// like, each its own orb in the dock. Click an orb to talk to it (gold ring); two-finger click for its menu
+// (transcript, Terminal, stop, resume, close). The ＋ button starts a new Claude or Codex session.
+// Codex sessions run on the Codex voice server (:5124); its approval prompts are shown here.
+import AppKit
+import SwiftUI
+
+struct OrbEntry: Codable, Equatable {
+    var name: String          // Claude: tmux session name ("voice", "voice-2"…); Codex: "codex", "codex-2"…
+    var kind: String          // "claude" | "codex"
+    var id: String            // Claude session id / Codex thread id
+    var cwd: String
+    var label: String? = nil
+    var hotkey: Hotkey? = nil // speak hotkey you set; nil = the default for its position
+    var closed: Bool? = nil   // you closed it: don't relaunch it automatically
+}
+
+/// A hold-to-talk key. Modifiers are side-specific (left ⌥ ≠ right ⌥). code -1 = no hotkey.
+struct Hotkey: Codable, Equatable {
+    var code: Int
+    var label: String
+    static let none = Hotkey(code: -1, label: "None")
+    static let leftOption = Hotkey(code: 58, label: "Left Option")
+    static let leftControl = Hotkey(code: 59, label: "Left Control")
+
+    /// Device-specific flag bit for each modifier key, so left and right can be told apart.
+    static let modifierBits: [Int: UInt64] = [
+        58: 0x20, 61: 0x40,          // ⌥ left / right
+        59: 0x01, 62: 0x2000,        // ⌃ left / right
+        56: 0x02, 60: 0x04,          // ⇧ left / right
+        55: 0x08, 54: 0x10,          // ⌘ left / right
+        63: 0x800000, 57: 0x10000,   // fn, caps lock
+    ]
+    static let names: [Int: String] = [
+        58: "Left Option", 61: "Right Option", 59: "Left Control", 62: "Right Control", 56: "Left Shift",
+        60: "Right Shift", 55: "Left Command", 54: "Right Command", 63: "fn", 57: "Caps Lock",
+        122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8", 101: "F9", 109: "F10",
+        103: "F11", 111: "F12", 105: "F13", 107: "F14", 113: "F15", 49: "Space", 48: "Tab", 51: "Delete",
+        36: "Return", 123: "←", 124: "→", 125: "↓", 126: "↑", 116: "Page Up", 121: "Page Down",
+        115: "Home", 119: "End", 50: "`",
+    ]
+    var isModifier: Bool { Hotkey.modifierBits[code] != nil }
+}
+
+/// Live orb for one session: reads the shared voice server status (Claude) or the Codex server status.
+struct SessionOrb: View {
+    let entry: OrbEntry
+    @ObservedObject var main: Model
+    @ObservedObject var codex: Model
+
+    var body: some View {
+        let s = main.s, now = Date().timeIntervalSince1970
+        let target = s.target == entry.name
+        if entry.kind == "codex" {
+            let live = codex.s.thread_id == entry.id
+            OrbFace(mode: !codex.online ? .offline : (live ? codex.mode : .idle),
+                    level: live ? codex.s.level : 0, outLevel: live ? codex.s.out_level : 0,
+                    auto: live && codex.s.auto, problem: live && codex.s.approval,
+                    idleColor: Color(red: 1.0, green: 0.73, blue: 0.3), selected: target, muted: live && codex.s.muted)
+                .scaleEffect(0.62)
+        } else {
+            let st = s.sessions[entry.name]
+            let working = (st?.state == "working" && now - (st?.at ?? 0) < 600)
+                || (entry.name == "voice" && s.sessions.isEmpty && s.voice_claude == "working" && now - s.voice_claude_at < 600)
+            let speaking = s.speaking && (s.speaking_session == entry.name || (s.speaking_session.isEmpty && entry.name == "voice"))
+            let mode: Mode = !main.online ? .offline
+                : (target && s.listening) ? .listening
+                : (target && now - s.heard_at < 0.6) ? .sent
+                : speaking ? .speaking
+                : working ? .working : .idle
+            OrbFace(mode: mode, level: target ? s.level : 0, outLevel: speaking ? s.out_level : 0,
+                    auto: target && s.auto, notes: target && s.notes, ripple: target && main.flying != nil,
+                    problem: target && main.problem, selected: target, muted: s.muted_sessions.contains(entry.name))
+                .scaleEffect(0.62)
+        }
+    }
+}
+
+final class SessionsController: NSObject {
+    let main: Model, codex: Model
+    weak var app: AppDelegate?
+    private(set) var entries: [OrbEntry] = []
+    private weak var dock: DockModel?
+    private var timer: Timer?
+    private let orbsPath = NSHomeDirectory() + "/.claude/voice/orbs.json"
+    private let launcher = NSHomeDirectory() + "/.claude/voice/start-voice-session.sh"
+    private let codexRoot = "/Users/kush/Documents/Codex/2026-10-04/can-x20/outputs/codex-voice-assistant"
+    private var promptedApproval = -1
+    private var approvalOpen = false
+
+    init(main: Model, codex: Model, app: AppDelegate) {
+        self.main = main; self.codex = codex; self.app = app
+        super.init()
+        load()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.load() }
+        retireCodexPet()
+        installKeyTap()
+        reviveTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.revive() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.revive() }   // soon after login
+    }
+
+    // MARK: orbs file (written by the launcher for Claude sessions, by us for Codex sessions)
+
+    func load() {
+        var list = (try? JSONDecoder().decode([OrbEntry].self, from: Data(contentsOf: URL(fileURLWithPath: orbsPath)))) ?? []
+        if !list.contains(where: { $0.name == "voice" }) {        // the default orb always exists
+            list.insert(OrbEntry(name: "voice", kind: "claude", id: "", cwd: "/Users/kush/Githubs/persistent agent"), at: 0)
+        }
+        if list != entries {
+            entries = list
+            dock?.orbIds = list.map(\.name)
+        }
+    }
+
+    private func save() {
+        if let d = try? JSONEncoder().encode(entries) { try? d.write(to: URL(fileURLWithPath: orbsPath)) }
+        dock?.orbIds = entries.map(\.name)
+    }
+
+    func attach(to dock: DockModel) {
+        self.dock = dock
+        dock.orbIds = entries.map(\.name)
+        dock.orbView = { [weak self] name in
+            guard let self, let e = self.entries.first(where: { $0.name == name }) else { return AnyView(EmptyView()) }
+            return AnyView(SessionOrb(entry: e, main: self.main, codex: self.codex))
+        }
+        dock.onOrbClick = { [weak self] name in self?.openTyping(name) }
+        dock.onOrbMenuFor = { [weak self] name, v, p in self?.orbMenu(name).popUp(positioning: nil, at: p, in: v) }
+        dock.onPlus = { [weak self] v, p in self?.plusMenu().popUp(positioning: nil, at: p, in: v) }
+    }
+
+    // MARK: keep every orb's session alive (after a crash, an error, or a restart of the Mac)
+
+    private var reviveTimer: Timer?
+    private var reviveBackoff: [String: (next: Date, wait: Double)] = [:]
+
+    private func runStatus(_ path: String, _ args: [String]) -> Int32 {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = args
+        p.standardOutput = Pipe(); p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return -1 }
+        p.waitUntilExit(); return p.terminationStatus
+    }
+
+    /// Relaunch any Claude orb whose session isn't running, resuming its own conversation.
+    func revive() {
+        for e in entries where e.kind == "claude" && e.closed != true && !(e.name == "voice" && e.id.isEmpty) {
+            guard runStatus("/opt/homebrew/bin/tmux", ["has-session", "-t", e.name]) != 0 else {
+                reviveBackoff[e.name] = nil; continue                    // running fine
+            }
+            if let b = reviveBackoff[e.name], Date() < b.next { continue }    // failed recently: wait
+            let wait = min((reviveBackoff[e.name]?.wait ?? 15) * 2, 600)  // 30 s, 1, 2, 4, 8, 10 min
+            reviveBackoff[e.name] = (Date().addingTimeInterval(wait), wait)
+            FileHandle.standardError.write("revive: relaunching orb \(e.name)\n".data(using: .utf8)!)
+            DispatchQueue.global().async { _ = self.app?.run(self.launcher, ["--name", e.name]) }
+        }
+    }
+
+    // MARK: speak hotkeys (1st orb: left Option, 2nd: left Control, 3rd+: none unless you set one)
+
+    func hotkey(for e: OrbEntry) -> Hotkey? {
+        let k: Hotkey
+        if let h = e.hotkey { k = h }
+        else {
+            let i = entries.firstIndex { $0.name == e.name } ?? 99
+            k = i == 0 ? .leftOption : i == 1 ? .leftControl : .none
+        }
+        return k.code < 0 ? nil : k
+    }
+
+    private var capturing: String? = nil            // orb waiting for "press the key you want"
+    private var capturePanel: NSPanel?
+    private var held: (code: Int, name: String)? = nil
+    private var keyTap: CFMachPort?
+
+    func hotkeyItems(for name: String, into m: NSMenu) {
+        guard let e = entries.first(where: { $0.name == name }) else { return }
+        let h = item("Speak hotkey: " + (hotkey(for: e)?.label ?? "none"), nil, enabled: false)
+        m.addItem(h)
+        m.addItem(item("Set speak hotkey…", #selector(setHotkey(_:)), name))
+        if hotkey(for: e) != nil { m.addItem(item("Remove speak hotkey", #selector(clearHotkey(_:)), name)) }
+    }
+
+    @objc func setHotkey(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String else { return }
+        capturing = n
+        showCapture("Press the key to hold for “\(entries.first { $0.name == n }.map { $0.label ?? $0.name } ?? n)”",
+                    "Any key works: a single modifier (right ⌘, fn…) or a key like F5. Esc cancels.")
+    }
+
+    @objc func clearHotkey(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String, let i = entries.firstIndex(where: { $0.name == n }) else { return }
+        entries[i].hotkey = Hotkey.none
+        save()
+    }
+
+    private func finishCapture(_ key: Hotkey?) {
+        defer { capturing = nil; capturePanel?.orderOut(nil); capturePanel = nil }
+        guard let n = capturing, let key, let i = entries.firstIndex(where: { $0.name == n }) else { return }
+        for j in entries.indices where j != i && hotkey(for: entries[j])?.code == key.code {
+            entries[j].hotkey = Hotkey.none                         // a key belongs to one orb only
+        }
+        entries[i].hotkey = key
+        save()
+    }
+
+    private func showCapture(_ title: String, _ detail: String) {
+        capturePanel?.orderOut(nil)
+        let screen = NSScreen.main?.frame ?? .zero
+        let w: CGFloat = 420, h: CGFloat = 110
+        let p = NSPanel(contentRect: NSRect(x: screen.midX - w / 2, y: screen.midY - h / 2, width: w, height: h),
+                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isOpaque = false; p.backgroundColor = .clear; p.level = .popUpMenu; p.hasShadow = true
+        p.contentView = NSHostingView(rootView:
+            VStack(spacing: 8) {
+                Image(systemName: "keyboard").font(.system(size: 22)).foregroundColor(Color(red: 1, green: 0.82, blue: 0.2))
+                Text(title).font(.system(size: 14, weight: .semibold, design: .rounded)).foregroundColor(.white)
+                Text(detail).font(.system(size: 11, design: .rounded)).foregroundColor(.white.opacity(0.6))
+            }
+            .frame(width: w, height: h)
+            .background(RoundedRectangle(cornerRadius: 16).fill(Color(white: 0.08).opacity(0.96))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.12)))))
+        p.orderFrontRegardless()
+        capturePanel = p
+    }
+
+    /// One event tap watches every orb's hotkey (and captures new ones). Needs Accessibility, which the pet has.
+    func installKeyTap() {
+        guard keyTap == nil else { return }
+        let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+                              | (1 << CGEventType.keyUp.rawValue)
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        let cb: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else { return Unmanaged.passUnretained(event) }
+            let c = Unmanaged<SessionsController>.fromOpaque(refcon).takeUnretainedValue()
+            if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                if let t = c.keyTap { CGEvent.tapEnable(tap: t, enable: true) }
+                return Unmanaged.passUnretained(event)
+            }
+            return c.handleKey(type, event) ? nil : Unmanaged.passUnretained(event)
+        }
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                          eventsOfInterest: mask, callback: cb, userInfo: me) else {
+            FileHandle.standardError.write("hotkeys: event tap unavailable (Accessibility?)\n".data(using: .utf8)!)
+            return
+        }
+        keyTap = tap
+        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    /// Returns true to swallow the event (a bound normal key shouldn't also type).
+    private func handleKey(_ type: CGEventType, _ e: CGEvent) -> Bool {
+        let code = Int(e.getIntegerValueField(.keyboardEventKeycode))
+        let flags = e.flags.rawValue
+        var down: Bool
+        if type == .flagsChanged {
+            guard let bit = Hotkey.modifierBits[code] else { return false }
+            down = flags & bit != 0
+        } else {
+            down = type == .keyDown
+            if type == .keyDown && e.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return held?.code == code                               // swallow key-repeat of a held hotkey
+            }
+        }
+        if capturing != nil {                                           // assigning a new hotkey
+            guard down else { return true }
+            if code == 53 { DispatchQueue.main.async { self.finishCapture(nil) }; return true }   // Esc cancels
+            var label = Hotkey.names[code]
+            if label == nil, let ns = NSEvent(cgEvent: e), let ch = ns.charactersIgnoringModifiers, !ch.isEmpty {
+                label = ch.uppercased()
+            }
+            let key = Hotkey(code: code, label: label ?? "Key \(code)")
+            DispatchQueue.main.async { self.finishCapture(key) }
+            return true
+        }
+        if down, held == nil, let e2 = entries.first(where: { hotkey(for: $0)?.code == code }) {
+            // Codex already listens to Control itself: let it handle a Codex orb on Control
+            if e2.kind == "codex", code == 59 || code == 62 { return false }
+            if type == .flagsChanged, flags & 0x1E0000 & ~Self.ownMask(code) != 0 { return false }  // part of a chord
+            held = (code, e2.name)
+            DispatchQueue.main.async { self.post5123("/ptt", ["name": e2.name, "kind": e2.kind, "down": "1"]) }
+            return type != .flagsChanged
+        }
+        if !down, let h = held, h.code == code {
+            held = nil
+            DispatchQueue.main.async { self.post5123("/ptt", ["name": h.name, "down": ""]) }
+            return type != .flagsChanged
+        }
+        return type != .flagsChanged && held?.code == code
+    }
+
+    /// The generic modifier mask a modifier key itself sets (so we only treat *other* modifiers as a chord).
+    private static func ownMask(_ code: Int) -> UInt64 {
+        switch code {
+        case 58, 61: return 0x80000     // ⌥
+        case 59, 62: return 0x40000     // ⌃
+        case 56, 60: return 0x20000     // ⇧
+        case 55, 54: return 0x100000    // ⌘
+        default: return 0
+        }
+    }
+
+    // MARK: talking to a session
+
+    /// Your voice now goes to this session.
+    func select(_ name: String) {
+        guard let e = entries.first(where: { $0.name == name }) else { return }
+        if e.kind == "codex", codex.s.thread_id != e.id { codexPost("/sessions/resume", ["session": e.id]) }
+        post5123("/target", ["name": e.name, "kind": e.kind])
+    }
+
+    // MARK: menus
+
+    private func item(_ title: String, _ action: Selector?, _ rep: Any? = nil, enabled: Bool = true) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        i.target = self; i.representedObject = rep; i.isEnabled = enabled && action != nil
+        return i
+    }
+
+    func plusMenu() -> NSMenu {
+        let m = NSMenu(); m.autoenablesItems = false
+        m.addItem(item("New Claude session", #selector(newClaude)))
+        m.addItem(item("New Claude session in folder…", #selector(newClaudeInFolder)))
+        m.addItem(.separator())
+        m.addItem(item("New Codex session", #selector(newCodex), enabled: codex.online))
+        m.addItem(item("New Codex session in folder…", #selector(newCodexInFolder), enabled: codex.online))
+        if !codex.online { m.addItem(item("Codex voice server isn't running", nil, enabled: false)) }
+        return m
+    }
+
+    func orbMenu(_ name: String) -> NSMenu {
+        let m = NSMenu(); m.autoenablesItems = false
+        guard let e = entries.first(where: { $0.name == name }) else { return m }
+        let title = (e.kind == "codex" ? "Codex · " : "Claude · ") + (e.label ?? sessionName(e))
+        let h = item(title, nil, enabled: false); h.toolTip = e.cwd; m.addItem(h)
+        let talk = item(main.s.target == name ? "✓ Talking to this session" : "Talk to this session", #selector(talkTo(_:)), name)
+        m.addItem(talk)
+        hotkeyItems(for: name, into: m)
+        m.addItem(.separator())
+        m.addItem(item("Open transcript", #selector(transcript(_:)), name))
+        if e.kind == "claude" { m.addItem(item("Show in Terminal", #selector(showTerminal(_:)), name)) }
+        m.addItem(item("Stop current task", #selector(stopTask(_:)), name))
+        let muted = e.kind == "codex" ? (codex.s.thread_id == e.id && codex.s.muted) : main.s.muted_sessions.contains(name)
+        let mi = item("Mute (show replies as text)", #selector(toggleMute(_:)), name)
+        mi.state = muted ? .on : .off
+        m.addItem(mi)
+        let resume = NSMenuItem(title: "Resume another session here", action: nil, keyEquivalent: "")
+        resume.submenu = resumeMenu(for: e)
+        m.addItem(resume)
+        if e.kind == "codex", codex.s.thread_id == e.id {
+            m.addItem(item(codex.s.auto ? "✓ Codex auto mode" : "Codex auto mode", #selector(codexAuto)))
+        }
+        m.addItem(.separator())
+        m.addItem(item(name == "voice" ? "Close session (the default orb stays)" : "Close session", #selector(close(_:)), name))
+        m.addItem(.separator())
+        app?.addGeneralItems(to: m)                                  // auto mode, notes, tunnel, OS mode… as before
+        return m
+    }
+
+    private func resumeMenu(for e: OrbEntry) -> NSMenu {
+        let sub = NSMenu(); sub.autoenablesItems = false
+        let fmt = DateFormatter(); fmt.dateFormat = "MMM d, h:mm a"
+        if e.kind == "claude" {
+            for s in app?.voiceSessions()?.sessions ?? [] {
+                let i = item("\(s.name)  ·  \(URL(fileURLWithPath: s.cwd).lastPathComponent) · \(fmt.string(from: Date(timeIntervalSince1970: s.started)))",
+                             #selector(resumeClaude(_:)), [e.name, s.id])
+                i.state = s.id == e.id ? .on : .off; i.toolTip = s.cwd
+                sub.addItem(i)
+            }
+        } else {
+            for s in codexSessions() {
+                let i = item(s.name + "  ·  " + URL(fileURLWithPath: s.cwd).lastPathComponent, #selector(resumeCodex(_:)), [e.name, s.id])
+                i.state = s.id == e.id ? .on : .off; i.toolTip = s.cwd
+                sub.addItem(i)
+            }
+        }
+        if sub.items.isEmpty { sub.addItem(item("No saved sessions", nil, enabled: false)) }
+        return sub
+    }
+
+    private func sessionName(_ e: OrbEntry) -> String {
+        app?.voiceSessions()?.sessions.first { $0.id == e.id }?.name ?? URL(fileURLWithPath: e.cwd).lastPathComponent
+    }
+
+    // MARK: actions
+
+    let typeBox = TypeBox()
+
+    /// Click an orb: a small field opens above it to type a message to that session.
+    func openTyping(_ name: String) {
+        guard let e = entries.first(where: { $0.name == name }) else { return }
+        if e.kind == "codex", codex.s.thread_id != e.id { codexPost("/sessions/resume", ["session": e.id]) }
+        // anchor above the orb itself: its dock spot in OS mode, else the corner orb (fall back to the mouse)
+        let orb = OrbAnchors.shared.screenRect(e.name) ?? app?.orbPanels.first.map { $0.frame }
+        let anchor = orb.map { NSPoint(x: $0.midX, y: $0.maxY) } ?? NSEvent.mouseLocation
+        typeBox.open(above: anchor, name: e.name, kind: e.kind, title: "To " + displayName(e.name))
+    }
+
+    @objc func talkTo(_ s: NSMenuItem) { if let n = s.representedObject as? String { select(n) } }
+
+    private func nextName(_ base: String) -> String {
+        var i = 2
+        while entries.contains(where: { $0.name == "\(base)-\(i)" }) { i += 1 }
+        return "\(base)-\(i)"
+    }
+
+    @objc func newClaude() { startClaude(nextName("voice"), ["--fresh"]) }
+    @objc func newClaudeInFolder() { if let f = pickFolder("New Claude voice session in folder") { startClaude(nextName("voice"), ["--fresh", "--cwd", f]) } }
+
+    private func startClaude(_ name: String, _ args: [String]) {
+        DispatchQueue.global().async {
+            _ = self.app?.run(self.launcher, ["--name", name] + args)
+            DispatchQueue.main.async { self.load(); self.select(name) }
+        }
+    }
+
+    @objc func newCodex() { startCodex(nil) }
+    @objc func newCodexInFolder() { if let f = pickFolder("New Codex voice session in folder") { startCodex(f) } }
+
+    private func startCodex(_ cwd: String?) {
+        var body: [String: String] = [:]
+        if let cwd { body["cwd"] = cwd }
+        codexPost("/sessions/new", body) { [weak self] result in
+            guard let self, let id = result?["id"] as? String else { return }
+            let name = self.entries.contains(where: { $0.name == "codex" }) ? self.nextName("codex") : "codex"
+            self.entries.append(OrbEntry(name: name, kind: "codex", id: id, cwd: result?["cwd"] as? String ?? cwd ?? "",
+                                         label: result?["name"] as? String))
+            self.save()
+            self.post5123("/target", ["name": name, "kind": "codex"])
+        }
+    }
+
+    @objc func resumeClaude(_ s: NSMenuItem) {
+        guard let a = s.representedObject as? [String] else { return }
+        startClaude(a[0], ["--resume", a[1]])
+    }
+
+    @objc func resumeCodex(_ s: NSMenuItem) {
+        guard let a = s.representedObject as? [String], let i = entries.firstIndex(where: { $0.name == a[0] }) else { return }
+        entries[i].id = a[1]
+        entries[i].label = codexSessions().first { $0.id == a[1] }?.name
+        save()
+        select(a[0])
+    }
+
+    @objc func transcript(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
+        if e.kind == "codex" {
+            NSWorkspace.shared.open(URL(fileURLWithPath: codexRoot + "/runtime/events.jsonl"))
+        } else if let app {
+            let path = app.run("/usr/bin/python3", [app.voiceDir + "/voice_sessions.py", "transcript", e.id])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !path.isEmpty { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+        }
+    }
+
+    @objc func showTerminal(_ s: NSMenuItem) {
+        if let n = s.representedObject as? String { post5123("/claude/show?s=\(n)", [:]) }
+    }
+
+    @objc func stopTask(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
+        if e.kind == "codex" { codexPost("/stop", [:]) } else { post5123("/claude/stop?s=\(n)", [:]) }
+    }
+
+    @objc func codexAuto() { codex.toggleAuto() }
+
+    @objc func toggleMute(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
+        if e.kind == "codex" {
+            codexPostAny("/mute", ["on": !codex.s.muted])
+        } else {
+            var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/mute")!)
+            req.httpMethod = "POST"; req.timeoutInterval = 2
+            req.httpBody = try? JSONSerialization.data(withJSONObject: ["session": n, "on": !main.s.muted_sessions.contains(n)])
+            URLSession.shared.dataTask(with: req).resume()
+        }
+    }
+
+    /// Display name for a session's reply card header.
+    func displayName(_ session: String) -> String {
+        guard let e = entries.first(where: { $0.name == session }) else { return session }
+        return (e.kind == "codex" ? "Codex · " : "Claude · ") + (e.label ?? URL(fileURLWithPath: e.cwd).lastPathComponent)
+    }
+
+    /// Close: ends the session and removes its orb (the default Claude orb restarts fresh instead).
+    @objc func close(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
+        if e.kind == "claude" { post5123("/claude/quit?s=\(n)", [:]) }
+        if e.kind == "codex", codex.s.thread_id == e.id { codexPost("/stop", [:]) }
+        if n == "voice" {
+            if let i = entries.firstIndex(where: { $0.name == "voice" }) { entries[i].id = ""; entries[i].closed = true }
+        } else {
+            entries.removeAll { $0.name == n }
+        }
+        save()
+        if main.s.target == n { select("voice") }
+    }
+
+    private func pickFolder(_ title: String) -> String? {
+        let p = NSOpenPanel()
+        p.title = title; p.prompt = "Start session"
+        p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)
+        return p.runModal() == .OK ? p.url?.path : nil
+    }
+
+    // MARK: Codex approvals (shown here, so Codex's own pet isn't needed)
+
+    func checkApproval() {
+        let s = codex.s
+        guard s.approval, s.approvalMethod != "item/tool/requestUserInput", s.approvalId != promptedApproval, !approvalOpen else { return }
+        promptedApproval = s.approvalId
+        approvalOpen = true
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "Codex needs your approval"
+            alert.informativeText = s.approvalDetail
+            alert.addButton(withTitle: "Approve"); alert.addButton(withTitle: "Deny"); alert.addButton(withTitle: "Close")
+            NSApp.activate(ignoringOtherApps: true)
+            let r = alert.runModal()
+            self.approvalOpen = false
+            if r == .alertFirstButtonReturn { self.codexPostAny("/approval", ["request_id": s.approvalId, "decision": "approve"]) }
+            else if r == .alertSecondButtonReturn { self.codexPostAny("/approval", ["request_id": s.approvalId, "decision": "deny"]) }
+        }
+    }
+
+    /// Codex's separate orb isn't needed any more: switch its launch agent off (reversible with launchctl enable).
+    private func retireCodexPet() {
+        DispatchQueue.global().async {
+            let uid = getuid()
+            _ = self.app?.run("/bin/launchctl", ["bootout", "gui/\(uid)/com.kush.codex-voice-pet"])
+            _ = self.app?.run("/bin/launchctl", ["disable", "gui/\(uid)/com.kush.codex-voice-pet"])
+        }
+        UserDefaults.standard.removeObject(forKey: "osPausedOtherPet")   // OS mode must not bring it back
+    }
+
+    // MARK: HTTP helpers
+
+    struct CodexSession: Decodable { let id: String; let name: String; let cwd: String }
+    struct CodexSessionList: Decodable { let active: String?; let sessions: [CodexSession] }
+
+    private func codexSessions() -> [CodexSession] {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:5124/sessions")!)
+        codex.authorize(&req); req.timeoutInterval = 1.5
+        var out: [CodexSession] = []
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { d, _, _ in
+            out = d.flatMap { try? JSONDecoder().decode(CodexSessionList.self, from: $0) }?.sessions ?? []
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 2)
+        return out
+    }
+
+    private func post5123(_ path: String, _ body: [String: String]) {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:5123" + path)!)
+        req.httpMethod = "POST"; req.timeoutInterval = 2
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: req).resume()
+    }
+
+    private func codexPost(_ path: String, _ body: [String: String], done: (([String: Any]?) -> Void)? = nil) {
+        codexPostAny(path, body, done: done)
+    }
+
+    private func codexPostAny(_ path: String, _ body: [String: Any], done: (([String: Any]?) -> Void)? = nil) {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:5124" + path)!)
+        codex.authorize(&req)
+        req.httpMethod = "POST"; req.timeoutInterval = 20
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        URLSession.shared.dataTask(with: req) { d, _, _ in
+            let r = d.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            DispatchQueue.main.async { done?(r) }
+        }.resume()
+    }
+}

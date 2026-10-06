@@ -1,0 +1,17 @@
+# Python environment (rebuild from requirements.txt) and caches
+kitten-venv/
+__pycache__/
+*.pyc
+
+# Runtime data: your conversations, voice history and live state
+stt.db
+stt.db.migration.lock
+transcripts/
+spool/
+session.json
+sessions.json
+orbs.json
+
+# Build output (rebuild with pet/build.sh)
+pet/VoicePet.app/Contents/MacOS/
+pet/VoicePet.app/Contents/_CodeSignature/

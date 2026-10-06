@@ -1,0 +1,12 @@
+#!/bin/bash
+# speak "text" — all hooks go through this. Kitten server queues speech; falls back to `say`.
+DIR="$HOME/.claude/voice"
+[ -f "$DIR/off" ] && exit 0
+source "$DIR/config"
+TEXT="$*"; [ -z "$TEXT" ] && TEXT=$(cat)
+[ -z "$TEXT" ] && exit 0
+if [ "$ENGINE" != "say" ]; then   # every engine except plain macOS say goes through the voice server
+  curl -s -m 2 --data-binary "$TEXT" "http://127.0.0.1:5123/say?kind=${SPEAK_KIND:-step}" >/dev/null && exit 0
+  launchctl kickstart "gui/$(id -u)/com.claude.kitten-tts" 2>/dev/null   # server down: restart it, use say this time
+fi
+exec /usr/bin/lockf -k /tmp/claude-voice.lock /usr/bin/say -v "$VOICE" -r "$RATE" -- "$TEXT"
