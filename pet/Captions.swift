@@ -15,7 +15,8 @@ struct ReplyCard: Identifiable, Equatable {
     let text: String
     let born: Date
     var muted = true                     // false: it was spoken aloud (hover shows it again)
-    var stay: Double { 10 }                                          // auto-hide after 10 s (or click outside)
+    /// Hover-revealed: 10 s. Arrived by itself (a muted reply): as long as the text takes to read.
+    var stay: Double { id.hasPrefix("peek-") ? 10 : min(25, 5 + Double(text.count) * 0.06) }
 }
 
 final class CaptionsModel: ObservableObject {
@@ -42,13 +43,10 @@ final class CaptionsModel: ObservableObject {
                 cards = [ReplyCard(id: "peek-" + l.id, title: l.title, text: l.text, born: Date(), muted: l.muted)]
             }
         } else if !on, peeking {
-            peeking = false
-            // stay a beat after you move off, then fade (unless you come back)
-            DispatchQueue.main.asyncAfter(deadline: .now() + OSMotion.linger) { [weak self] in
-                guard let self, !self.peeking else { return }
-                self.hovering = false
-                self.cards.filter { $0.id.hasPrefix("peek-") }.forEach { self.dismiss($0.id) }
-            }
+            // moving off the orb doesn't close it: like every bubble it stays until a click outside or 10 s
+            peeking = false; hovering = false
+            cards = cards.map { $0.id.hasPrefix("peek-") ? ReplyCard(id: $0.id, title: $0.title, text: $0.text,
+                                                                        born: Date(), muted: $0.muted) : $0 }
         }
     }
 
