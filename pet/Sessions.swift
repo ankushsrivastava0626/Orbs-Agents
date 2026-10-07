@@ -352,6 +352,8 @@ final class SessionsController: NSObject {
 
     func plusMenu() -> NSMenu {
         let m = NSMenu(); m.autoenablesItems = false
+        m.addItem(item("Search sessions…", #selector(openSearch)))
+        m.addItem(.separator())
         m.addItem(item("New Claude session", #selector(newClaude)))
         m.addItem(item("New Claude session in folder…", #selector(newClaudeInFolder)))
         m.addItem(.separator())
@@ -450,6 +452,32 @@ final class SessionsController: NSObject {
     }
 
     let typeBox = TypeBox()
+    lazy var search: SessionSearch = {
+        let s = SessionSearch()
+        s.runSearch = { [weak self] q in
+            guard let self, let app = self.app else { return [] }
+            let out = app.run("/usr/bin/python3", [app.voiceDir + "/orb_search.py", q])
+            return (try? JSONDecoder().decode([SearchHit].self, from: Data(out.utf8))) ?? []
+        }
+        s.m.onPick = { [weak self] h in self?.resumeFromSearch(h) }
+        return s
+    }()
+
+    @objc func openSearch() { search.open(openIds: Set(entries.map(\.id))) }
+
+    /// A search result: bring its orb forward if it's already open, else open a new orb resuming it.
+    private func resumeFromSearch(_ h: SearchHit) {
+        search.close()
+        if let e = entries.first(where: { $0.id == h.id }) { select(e.name); return }
+        if h.kind == "claude" {
+            startClaude(newClaudeName(), ["--resume", h.id, "--cwd", h.cwd])
+        } else {
+            let name = entries.contains(where: { $0.name == "codex" }) ? nextName("codex") : "codex"
+            entries.append(OrbEntry(name: name, kind: "codex", id: h.id, cwd: h.cwd, label: h.name ?? h.title))
+            save()
+            select(name)                                               // switches the Codex server to it
+        }
+    }
 
     /// The first orb in the dock: the corner orb acts for it outside OS mode.
     var firstName: String? { entries.first?.name }

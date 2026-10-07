@@ -15,3 +15,4 @@ orbs.json
 # Build output (rebuild with pet/build.sh)
 pet/VoicePet.app/Contents/MacOS/
 pet/VoicePet.app/Contents/_CodeSignature/
+cache/
