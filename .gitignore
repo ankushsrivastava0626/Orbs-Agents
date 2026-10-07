@@ -11,6 +11,7 @@ spool/
 session.json
 sessions.json
 orbs.json
+orb_names.json
 
 # Build output (rebuild with pet/build.sh)
 pet/VoicePet.app/Contents/MacOS/

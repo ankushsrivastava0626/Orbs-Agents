@@ -5,6 +5,20 @@
 import AppKit
 import SwiftUI
 
+/// Names you give orbs, by conversation id (so the name follows the conversation: resume, search, cards…).
+enum OrbNames {
+    static let path = NSHomeDirectory() + "/.claude/voice/orb_names.json"
+    static func all() -> [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: Data(contentsOf: URL(fileURLWithPath: path)))) ?? [:]
+    }
+    static func get(_ id: String) -> String? { all()[id] }
+    static func set(_ id: String, _ name: String?) {
+        var a = all()
+        a[id] = (name?.isEmpty ?? true) ? nil : name
+        if let d = try? JSONEncoder().encode(a) { try? d.write(to: URL(fileURLWithPath: path), options: .atomic) }
+    }
+}
+
 struct OrbEntry: Codable, Equatable {
     var name: String          // Claude: tmux session name ("voice", "voice-2"…); Codex: "codex", "codex-2"…
     var kind: String          // "claude" | "codex"
@@ -123,7 +137,7 @@ final class SessionsController: NSObject {
         dock.orbIds = entries.map(\.name)
         dock.orbView = { [weak self] name in
             guard let self, let e = self.entries.first(where: { $0.name == name }) else { return AnyView(EmptyView()) }
-            return AnyView(SessionOrb(entry: e, main: self.main, codex: self.codex))
+            return AnyView(SessionOrb(entry: e, main: self.main, codex: self.codex).help(self.displayName(name)))
         }
         dock.onOrbClick = { [weak self] name in self?.openTyping(name) }
         dock.onOrbDrag = { [weak self] name, phase, p in self?.drag(name, phase, p) }
@@ -366,12 +380,13 @@ final class SessionsController: NSObject {
     func orbMenu(_ name: String) -> NSMenu {
         let m = NSMenu(); m.autoenablesItems = false
         guard let e = entries.first(where: { $0.name == name }) else { return m }
-        let title = (e.kind == "codex" ? "Codex · " : "Claude · ") + (e.label ?? sessionName(e))
+        let title = (e.kind == "codex" ? "Codex · " : "Claude · ") + (OrbNames.get(e.id) ?? e.label ?? sessionName(e))
         let h = item(title, nil, enabled: false); h.toolTip = e.cwd; m.addItem(h)
         let talk = item(main.s.target == name ? "✓ Talking to this session" : "Talk to this session", #selector(talkTo(_:)), name)
         m.addItem(talk)
         hotkeyItems(for: name, into: m)
         m.addItem(.separator())
+        m.addItem(item("Rename…", #selector(rename(_:)), name))
         m.addItem(item("Open transcript", #selector(transcript(_:)), name))
         if e.kind == "claude" { m.addItem(item("Show in Terminal", #selector(showTerminal(_:)), name)) }
         m.addItem(item("Stop current task", #selector(stopTask(_:)), name))
@@ -404,7 +419,7 @@ final class SessionsController: NSObject {
             }
         } else {
             for s in codexSessions() {
-                let i = item(s.name + "  ·  " + URL(fileURLWithPath: s.cwd).lastPathComponent, #selector(resumeCodex(_:)), [e.name, s.id])
+                let i = item((OrbNames.get(s.id) ?? s.name) + "  ·  " + URL(fileURLWithPath: s.cwd).lastPathComponent, #selector(resumeCodex(_:)), [e.name, s.id])
                 i.state = s.id == e.id ? .on : .off; i.toolTip = s.cwd
                 sub.addItem(i)
             }
@@ -552,6 +567,23 @@ final class SessionsController: NSObject {
         }
     }
 
+    @objc func rename(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
+        let a = NSAlert()
+        a.messageText = "Name this orb"
+        a.informativeText = "Shown in its menu, reply cards, Resume and Search, instead of its first message. Leave empty to clear."
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        f.stringValue = OrbNames.get(e.id) ?? ""
+        f.placeholderString = sessionName(e)
+        a.accessoryView = f
+        a.addButton(withTitle: "Save"); a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        OrbNames.set(e.id, f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        if let dock { let ids = dock.orbIds; dock.orbIds = []; dock.orbIds = ids }   // redraw with the new name
+    }
+
     @objc func showTerminal(_ s: NSMenuItem) {
         if let n = s.representedObject as? String { post5123("/claude/show?s=\(n)", [:]) }
     }
@@ -578,7 +610,7 @@ final class SessionsController: NSObject {
     /// Display name for a session's reply card header.
     func displayName(_ session: String) -> String {
         guard let e = entries.first(where: { $0.name == session }) else { return session }
-        return (e.kind == "codex" ? "Codex · " : "Claude · ") + (e.label ?? URL(fileURLWithPath: e.cwd).lastPathComponent)
+        return (e.kind == "codex" ? "Codex · " : "Claude · ") + (OrbNames.get(e.id) ?? e.label ?? URL(fileURLWithPath: e.cwd).lastPathComponent)
     }
 
     /// Close: ends the session and removes its orb (the default Claude orb restarts fresh instead).

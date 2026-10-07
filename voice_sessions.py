@@ -22,7 +22,12 @@ def user_text(e):
         if isinstance(b, dict) and b.get("type") == "text": return b.get("text", "")
     return ""
 
+def custom_name(sid):
+    try: return json.load(open(os.path.join(V, "orb_names.json"))).get(sid)
+    except Exception: return None
+
 def name_of(sid, cwd):
+    if custom_name(sid): return custom_name(sid)
     p = jsonl(sid, cwd)
     if p:
         for line in open(p):

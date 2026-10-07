@@ -108,6 +108,7 @@ def snippet(text, words):
 def main():
     words = [w.lower() for w in sys.argv[1:] for w in w.split() if w.strip()]
     cache = load(CACHE, {})
+    names = load(os.path.join(V, "orb_names.json"), {})
     fresh = {}
     results = []
     for s in sessions():
@@ -120,8 +121,9 @@ def main():
         fresh[f] = c
         if not c["text"].strip(): continue                    # never actually talked to it
         low = c["text"].lower()
+        if names.get(s["id"]): low = names[s["id"]].lower() + "\n" + low      # its name is searchable too
         if words and not all(w in low for w in words): continue
-        title = c["first"][:80] or s["name"] or os.path.basename(s["cwd"].rstrip("/"))
+        title = names.get(s["id"]) or c["first"][:80] or s["name"] or os.path.basename(s["cwd"].rstrip("/"))
         results.append({"kind": s["kind"], "id": s["id"], "cwd": s["cwd"], "title": title, "name": s["name"], "when": m,
                         "snippet": snippet(c["text"], words), "hits": sum(low.count(w) for w in words)})
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
