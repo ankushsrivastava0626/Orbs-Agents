@@ -173,14 +173,14 @@ final class SessionsController: NSObject {
 
     // MARK: speak hotkeys (1st orb: left Control, 2nd: left Option, 3rd+: none unless you set one)
 
+    /// Hotkeys follow the dock: 1st orb holds 1, 2nd holds 2 … 10th holds 0 (drag to reorder = new keys).
+    static let numberKeys: [(Int, String)] = [(18, "1"), (19, "2"), (20, "3"), (21, "4"), (23, "5"),
+                                              (22, "6"), (26, "7"), (28, "8"), (25, "9"), (29, "0")]
+    static let notesKey = 58                          // left Option: hold to take a note, any time
+
     func hotkey(for e: OrbEntry) -> Hotkey? {
-        let k: Hotkey
-        if let h = e.hotkey { k = h }
-        else {
-            let i = entries.firstIndex { $0.name == e.name } ?? 99
-            k = i == 0 ? .leftControl : i == 1 ? .leftOption : .none
-        }
-        return k.code < 0 ? nil : k
+        guard let i = entries.firstIndex(where: { $0.name == e.name }), i < Self.numberKeys.count else { return nil }
+        return Hotkey(code: Self.numberKeys[i].0, label: Self.numberKeys[i].1)
     }
 
     private var capturing: String? = nil            // orb waiting for "press the key you want"
@@ -190,10 +190,9 @@ final class SessionsController: NSObject {
 
     func hotkeyItems(for name: String, into m: NSMenu) {
         guard let e = entries.first(where: { $0.name == name }) else { return }
-        let h = item("Speak hotkey: " + (hotkey(for: e)?.label ?? "none"), nil, enabled: false)
-        m.addItem(h)
-        m.addItem(item("Set speak hotkey…", #selector(setHotkey(_:)), name))
-        if hotkey(for: e) != nil { m.addItem(item("Remove speak hotkey", #selector(clearHotkey(_:)), name)) }
+        m.addItem(item(hotkey(for: e).map { "Hold \($0.label) to talk (set by its place in the dock)" }
+                       ?? "No hotkey (only the first 10 orbs get one)", nil, enabled: false))
+        m.addItem(item("Hold Left Option to take a note", nil, enabled: false))
     }
 
     @objc func setHotkey(_ s: NSMenuItem) {
@@ -300,7 +299,9 @@ final class SessionsController: NSObject {
             }
             return false
         }
-        if down, held == nil, let e2 = entries.first(where: { hotkey(for: $0)?.code == code }) {
+        let who: (name: String, kind: String)? = code == Self.notesKey ? ("__notes__", "notes")
+            : entries.first(where: { hotkey(for: $0)?.code == code }).map { ($0.name, $0.kind) }
+        if down, held == nil, let e2 = who {
             if type == .flagsChanged, flags & 0x1E0000 & ~Self.ownMask(code) != 0 { return false }  // part of a chord
             let modifier = type == .flagsChanged
             held = (code, e2.name, modifier ? nil : e.copy(), false)

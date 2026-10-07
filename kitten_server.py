@@ -142,6 +142,29 @@ def refresh_audio():
         except Exception as e:
             print("audio refresh failed:", repr(e), flush=True)
 
+import ctypes as _ct
+_ca = _ct.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+class _Addr(_ct.Structure):
+    _fields_ = [("sel", _ct.c_uint32), ("scope", _ct.c_uint32), ("elem", _ct.c_uint32)]
+_last_out = [None]
+
+def default_output_id():
+    """The Mac's current output device (what the volume keys control), straight from CoreAudio."""
+    a = _Addr(0x644F7574, 0x676C6F62, 0)                  # 'dOut', 'glob', main element
+    dev, size = _ct.c_uint32(0), _ct.c_uint32(4)
+    err = _ca.AudioObjectGetPropertyData(_ct.c_uint32(1), _ct.byref(a), 0, None, _ct.byref(size), _ct.byref(dev))
+    return dev.value if err == 0 else None
+
+def follow_output_device():
+    """Earphones plugged in / AirPods connected since we last spoke: PortAudio still points at the old
+    device, so Joe would come out of the speakers (and ignore the volume keys). Re-read devices first."""
+    cur = default_output_id()
+    if cur is not None and _last_out[0] is not None and cur != _last_out[0] and not PTT.get("down"):
+        refresh_audio()
+    if cur is not None: _last_out[0] = cur
+
+_last_out[0] = default_output_id()                      # the device PortAudio picked up at start
+
 def is_audio_error(e):
     return e is not None and "PortAudio" in repr(e)
 
@@ -176,6 +199,8 @@ def speak_kokoro(text, cfg, my_gen):
 def worker():
     while True:
         my_gen, text, kind, who = jobs.get()
+        try: follow_output_device()
+        except Exception as e: print("output check failed:", repr(e), flush=True)
         STATUS["speaking_session"] = who
         if kind == "SAY":                                     # remember each orb's last reply (hover shows it)
             STATUS["last_said"][who or "voice"] = {"id": f"s{time.time():.3f}", "session": who or "voice",
@@ -308,8 +333,10 @@ class H(BaseHTTPRequestHandler):
                     PTT.update(cancel=True, down=False)
                     if PTT.get("prev"): STATUS.update(target=PTT["prev"][0], target_kind=PTT["prev"][1])
                     self._ok(); return
-                if ev.get("down"):
-                    PTT.update(cancel=False, prev=(STATUS.get("target"), STATUS.get("target_kind")))
+                if ev.get("down") and ev.get("kind") == "notes":   # left Option: a note, whatever orb is selected
+                    PTT.update(cancel=False, notes=True, prev=None)
+                elif ev.get("down"):
+                    PTT.update(cancel=False, notes=False, prev=(STATUS.get("target"), STATUS.get("target_kind")))
                     STATUS.update(target=ev.get("name", "voice"), target_kind=ev.get("kind", "claude"))
                     st = STATUS["sessions"].get(STATUS["target"], {})
                     STATUS.update(voice_claude=st.get("state", "idle"), voice_claude_at=st.get("at", 0))
@@ -509,7 +536,7 @@ def is_noise(text):
     t = re.sub(r"[^a-z ]", "", text.lower()).strip()
     return not t or t in NOISE
 
-def deliver(path):
+def deliver(path, as_note=False):
     """Transcribe a recorded utterance and send it to its session — but only if you actually said something:
     silence, a cough or a breath is dropped before anything is sent (so nothing gets started by accident)."""
     try:
@@ -531,7 +558,7 @@ def deliver(path):
         if text: print("dropped: noise transcript:", repr(text), flush=True)
         return ""
     if len(text.split()) >= 1:
-        if STATUS["notes"]:
+        if STATUS["notes"] or as_note:
             propose_note(text)
         else:
             send_to_claude(text)
@@ -704,7 +731,7 @@ def command_watch():
                 audio = np.concatenate(chunks)[:, 0]
                 f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
                 sf.write(f.name, audio, 16000)
-                threading.Thread(target=deliver, args=(f.name,), daemon=True).start()
+                threading.Thread(target=deliver, args=(f.name, PTT.get("notes", False)), daemon=True).start()
         time.sleep(0.03)
 
 def drain_spool():
