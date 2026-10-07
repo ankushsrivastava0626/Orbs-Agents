@@ -56,12 +56,24 @@ def claude_text(path):
     return first, "\n".join(lines)
 
 
+def spoken(code):
+    """What Codex said out loud: tools.speak({text:"…"}) inside its exec calls."""
+    out = []
+    for m in re.finditer(r'speak\(\s*\{\s*text\s*:\s*("(?:[^"\\]|\\.)*")', code):
+        try: out.append(json.loads(m.group(1)))
+        except Exception: pass
+    return out
+
+
 def codex_text(path):
     lines, first = [], ""
     for raw in open(path, errors="ignore"):
         try: e = json.loads(raw)
         except Exception: continue
         p = e.get("payload") or {}
+        if e.get("type") == "response_item" and p.get("type") == "custom_tool_call":
+            lines += spoken(p.get("input") or "")
+            continue
         if e.get("type") != "response_item" or p.get("type") != "message" or p.get("role") not in ("user", "assistant"):
             continue
         for s in blocks(p.get("content")):

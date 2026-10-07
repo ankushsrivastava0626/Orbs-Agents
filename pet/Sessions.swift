@@ -558,10 +558,8 @@ final class SessionsController: NSObject {
 
     @objc func transcript(_ s: NSMenuItem) {
         guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
-        if e.kind == "codex" {
-            NSWorkspace.shared.open(URL(fileURLWithPath: codexRoot + "/runtime/events.jsonl"))
-        } else if let app {
-            let path = app.run("/usr/bin/python3", [app.voiceDir + "/voice_sessions.py", "transcript", e.id])
+        if let app {
+            let path = app.run("/usr/bin/python3", [app.voiceDir + "/voice_sessions.py", "transcript", e.id, e.kind])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !path.isEmpty { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
         }

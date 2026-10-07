@@ -78,6 +78,42 @@ def transcript(sid=None):
     open(out, "w").write("\n".join(lines))
     print(out)
 
+def codex_transcript(sid):
+    """A Codex orb's own conversation, read from its Codex rollout file."""
+    sys.path.insert(0, V)
+    import orb_search
+    f = orb_search.codex_file(sid)
+    reg = orb_search.load(os.path.join(orb_search.CODEX_ROOT, "runtime", "sessions.json"), {}).get("sessions", [])
+    s = next((x for x in reg if x.get("id") == sid), {})
+    title = custom_name(sid) or s.get("name") or sid
+    os.makedirs(os.path.join(V, "transcripts"), exist_ok=True)
+    out = os.path.join(V, "transcripts", sid + ".md")
+    lines = [f"# Codex session: {title}", f"*{s.get('cwd', '')}*", ""]
+    if not f:
+        lines.append("_No transcript yet: say something first._")
+    else:
+        for raw in open(f, errors="ignore"):
+            try: e = json.loads(raw)
+            except Exception: continue
+            p = e.get("payload") or {}
+            if e.get("type") != "response_item": continue
+            if p.get("type") == "message" and p.get("role") in ("user", "assistant"):
+                for t in orb_search.blocks(p.get("content")):
+                    t = t.strip()
+                    if not t or t.startswith("<"): continue
+                    lines += [f"**🎙 You:** {t}" if p["role"] == "user" else f"*{t}*", ""]
+            elif p.get("type") == "custom_tool_call":
+                said = orb_search.spoken(p.get("input") or "")
+                for t in said: lines += [f"**🔊 Joe:** {t}", ""]
+                if not said:
+                    first = (p.get("input") or "").strip().split("\n")[0][:120]
+                    lines += [f"> ⚙️ {p.get('name', 'tool')}{': ' + first if first else ''}", ""]
+            elif p.get("type") == "function_call":
+                lines += [f"> ⚙️ {p.get('name', 'tool')}", ""]
+    open(out, "w").write("\n".join(lines))
+    print(out)
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "transcript": transcript(sys.argv[2] if len(sys.argv) > 2 else None)
+    if len(sys.argv) > 3 and sys.argv[1] == "transcript" and sys.argv[3] == "codex": codex_transcript(sys.argv[2])
+    elif len(sys.argv) > 1 and sys.argv[1] == "transcript": transcript(sys.argv[2] if len(sys.argv) > 2 else None)
     else: print(json.dumps(load()))
