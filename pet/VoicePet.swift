@@ -536,6 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cardPanels: [KeyPanel] = []
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        DispatchQueue.main.async { [weak self] in self?.canvas.restore() }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon, never steals focus
         model.orbFrames = { [weak self] in self?.orbPanels.map(\.frame) ?? [] }
         model.onCardActive = { [weak self] visible, wantsKeys in
@@ -676,11 +677,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         for c in list where !seenCaptions.contains(c.id) {
             seenCaptions.insert(c.id)
-            bubble(for: c.session).0.add(c.id, title: sessions.displayName(c.session), text: c.text)
+            if canvas.enabled {                                   // the canvas shows it instead of a popping bubble
+                toCanvas(c.id, c.session, c.text)
+                bubble(for: c.session).0.remember(c.id, title: sessions.displayName(c.session), text: c.text)
+            } else {
+                bubble(for: c.session).0.add(c.id, title: sessions.displayName(c.session), text: c.text)
+            }
         }
         // spoken replies (not muted): kept as each orb's last message, shown when you hover the orb
         for (session, c) in model.s.last_said where !seenCaptions.contains(c.id) {
             seenCaptions.insert(c.id)
+            toCanvas(c.id, session, c.text)
             bubble(for: session).0.remember(c.id, title: sessions.displayName(session), text: c.text)
         }
         let cm = codexModel.s
@@ -688,11 +695,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastCodexSpoken = cm.spoken
             let name = sessions.entries.first { $0.kind == "codex" && $0.id == cm.thread_id }?.name ?? "codex"
             bubble(for: name).0.remember("codexs-\(cm.spoken.hashValue)", title: sessions.displayName(name), text: cm.spoken)
+            toCanvas("codexs-\(cm.spoken.hashValue)", name, cm.spoken)
         }
         if cm.muted, cm.muted_at > lastCodexMuted, !cm.muted_text.isEmpty {
             lastCodexMuted = cm.muted_at
             let name = sessions.entries.first { $0.kind == "codex" && $0.id == cm.thread_id }?.name ?? "codex"
-            bubble(for: name).0.add("codex-\(cm.muted_at)", title: sessions.displayName(name), text: cm.muted_text)
+            if canvas.enabled {
+                toCanvas("codex-\(cm.muted_at)", name, cm.muted_text)
+                bubble(for: name).0.remember("codex-\(cm.muted_at)", title: sessions.displayName(name), text: cm.muted_text)
+            } else {
+                bubble(for: name).0.add("codex-\(cm.muted_at)", title: sessions.displayName(name), text: cm.muted_text)
+            }
         }
         for s in bubbles.keys where !(bubbles[s]?.0.cards.isEmpty ?? true) { placeBubble(s) }   // follow the dock
         model.cornerSession = sessions.firstName ?? ""
@@ -716,6 +729,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func codexAuto() { codexModel.toggleAuto() }
     lazy var sessions = SessionsController(main: model, codex: codexModel, app: self)
+    let canvas = Canvas()
+    @objc func menuCanvas() { canvas.toggle() }
+
+    /// Something an agent said: onto the canvas (if it's on).
+    func toCanvas(_ id: String, _ session: String, _ text: String) {
+        guard canvas.enabled, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let kind = sessions.entries.first { $0.name == session }?.kind ?? "claude"
+        canvas.m.add(CanvasLine(id: id, who: sessions.displayName(session), kind: kind, text: text, at: Date()))
+    }
 
     /// The Codex assistant's orb (its own voice server on :5124, token in its runtime folder).
     lazy var codexModel = Model(
@@ -1036,6 +1058,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         item("Stop Claude (interrupt current task)", #selector(menuStopClaude))
         item("OS mode (double-tap left Option)", #selector(menuOSMode), on: osMode.on)
+        item("Canvas (show what agents say)", #selector(menuCanvas), on: canvas.enabled)
         item("Tunnel vision (Esc to exit)", #selector(menuTunnel), on: !tunnelPanels.isEmpty)
         let shape = NSMenuItem(title: "Tunnel shape", action: nil, keyEquivalent: "")
         let sub = NSMenu()
