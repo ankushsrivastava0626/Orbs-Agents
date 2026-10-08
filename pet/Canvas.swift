@@ -1,6 +1,7 @@
 // Canvas: a small always-on card (top right by default) that prints whatever any agent says, newest first.
 // Turned on from any orb's menu. Drag it anywhere, resize it from its edges; it remembers both.
 import AppKit
+import NaturalLanguage
 import SwiftUI
 
 struct CanvasLine: Identifiable, Equatable {
@@ -69,6 +70,24 @@ struct SpeechCanvasView: View {
         .animation(m.shown ? OSMotion.show : .easeInOut(duration: 0.35), value: m.shown)
     }
 
+    /// Split into sentences (Apple's sentence tokenizer: "e.g.", "Dr.", "3.5" don't break), and lines the agent
+    /// already broke stay broken.
+    static func sentences(_ text: String) -> [String] {
+        var out: [String] = []
+        for para in text.components(separatedBy: .newlines) {
+            let p = para.trimmingCharacters(in: .whitespaces)
+            guard !p.isEmpty else { continue }
+            let tok = NLTokenizer(unit: .sentence)
+            tok.string = p
+            tok.enumerateTokens(in: p.startIndex..<p.endIndex) { r, _ in
+                let s = p[r].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !s.isEmpty { out.append(s) }
+                return true
+            }
+        }
+        return out.isEmpty ? [text] : out
+    }
+
     func line(_ l: CanvasLine, latest: Bool) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
@@ -79,11 +98,16 @@ struct SpeechCanvasView: View {
                 Text(l.at, format: .dateTime.hour().minute())
                     .font(.system(size: 9, design: .rounded)).foregroundColor(.white.opacity(0.3)).monospacedDigit()
             }
-            Text(l.text)
-                .font(.system(size: latest ? 14 : 12, weight: latest ? .medium : .regular, design: .rounded))
-                .foregroundColor(.white.opacity(latest ? 0.95 : 0.5))
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: latest ? 7 : 4) {      // one sentence per line, a little air between
+                ForEach(Array(Self.sentences(l.text).enumerated()), id: \.offset) { _, s in
+                    Text(s)
+                        .font(.system(size: latest ? 14 : 12, weight: latest ? .medium : .regular, design: .rounded))
+                        .foregroundColor(.white.opacity(latest ? 0.95 : 0.5))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .textSelection(.enabled)
         }
     }
 }
