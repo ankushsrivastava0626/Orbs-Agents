@@ -13,15 +13,20 @@ struct CanvasLine: Identifiable, Equatable {
 }
 
 final class CanvasModel: ObservableObject {
-    @Published var lines: [CanvasLine] = []
+    @Published var latest: CanvasLine? = nil
     @Published var shown = false
+    var seen: Set<String> = []
+    var onNeeded: ((CGFloat) -> Void)?       // height the current text needs
     func add(_ l: CanvasLine) {
-        guard !lines.contains(where: { $0.id == l.id }) else { return }
-        withAnimation(OSMotion.show) {
-            lines.insert(l, at: 0)
-            if lines.count > 30 { lines.removeLast(lines.count - 30) }
-        }
+        guard !seen.contains(l.id) else { return }
+        seen.insert(l.id)
+        withAnimation(OSMotion.show) { latest = l }
     }
+}
+
+struct CanvasHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 struct SpeechCanvasView: View {
@@ -30,34 +35,48 @@ struct SpeechCanvasView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "text.bubble").font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.5))
-                Text("Canvas").font(.system(size: 10, weight: .semibold, design: .rounded)).foregroundColor(.white.opacity(0.5))
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundColor(.white.opacity(0.55))
-                        .frame(width: 16, height: 16).background(Circle().fill(Color.white.opacity(0.08)))
-                }.buttonStyle(.plain).help("Close canvas")
-            }
-            .padding(.horizontal, 12).padding(.top, 9).padding(.bottom, 6)
-            if m.lines.isEmpty {
-                Text("Whatever an agent says shows up here.")
-                    .font(.system(size: 12, design: .rounded)).foregroundColor(.white.opacity(0.35))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        ForEach(Array(m.lines.enumerated()), id: \.element.id) { i, l in
-                            line(l, latest: i == 0)
-                                .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity),
-                                                        removal: .opacity))
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Image(systemName: "text.bubble").font(.system(size: 10, weight: .bold)).foregroundColor(.white.opacity(0.5))
+                    Text(m.latest?.who ?? "Canvas").font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white.opacity(0.55)).lineLimit(1)
+                    Spacer()
+                    if let at = m.latest?.at {
+                        Text(at, format: .dateTime.hour().minute())
+                            .font(.system(size: 9, design: .rounded)).foregroundColor(.white.opacity(0.3)).monospacedDigit()
+                    }
+                    Button(action: onClose) {
+                        Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundColor(.white.opacity(0.55))
+                            .frame(width: 16, height: 16).background(Circle().fill(Color.white.opacity(0.08)))
+                    }.buttonStyle(.plain).help("Close canvas")
+                }
+                .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
+                if let l = m.latest {
+                    VStack(alignment: .leading, spacing: 8) {                // one sentence per line, a little air between
+                        ForEach(Array(Self.sentences(l.text).enumerated()), id: \.offset) { _, s in
+                            Text(s)
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                                .foregroundColor(.white.opacity(0.95))
+                                .lineSpacing(2)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .padding(.horizontal, 12).padding(.bottom, 12)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 14).padding(.bottom, 16)
+                    .id(l.id)
+                    .transition(.asymmetric(insertion: .opacity.combined(with: .offset(y: 6)), removal: .opacity))
+                } else {
+                    Text("Whatever an agent says shows up here.")
+                        .font(.system(size: 12, design: .rounded)).foregroundColor(.white.opacity(0.35))
+                        .padding(.horizontal, 14).padding(.bottom, 16)
                 }
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .background(GeometryReader { g in Color.clear.preference(key: CanvasHeightKey.self, value: g.size.height) })
+            Spacer(minLength: 0)
         }
-        .frame(minWidth: 220, maxWidth: .infinity, minHeight: 120, maxHeight: .infinity)
+        .onPreferenceChange(CanvasHeightKey.self) { h in m.onNeeded?(h) }
+        .frame(minWidth: 220, maxWidth: .infinity, minHeight: 80, maxHeight: .infinity, alignment: .top)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color(white: 0.07).opacity(0.96))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.12), lineWidth: 1)))
         .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -88,28 +107,6 @@ struct SpeechCanvasView: View {
         return out.isEmpty ? [text] : out
     }
 
-    func line(_ l: CanvasLine, latest: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
-                Circle().fill(Color.white.opacity(latest ? 0.9 : 0.3)).frame(width: 5, height: 5)
-                Text(l.who).font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white.opacity(latest ? 0.7 : 0.4)).lineLimit(1)
-                Spacer(minLength: 4)
-                Text(l.at, format: .dateTime.hour().minute())
-                    .font(.system(size: 9, design: .rounded)).foregroundColor(.white.opacity(0.3)).monospacedDigit()
-            }
-            VStack(alignment: .leading, spacing: latest ? 7 : 4) {      // one sentence per line, a little air between
-                ForEach(Array(Self.sentences(l.text).enumerated()), id: \.offset) { _, s in
-                    Text(s)
-                        .font(.system(size: latest ? 14 : 12, weight: latest ? .medium : .regular, design: .rounded))
-                        .foregroundColor(.white.opacity(latest ? 0.95 : 0.5))
-                        .lineSpacing(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .textSelection(.enabled)
-        }
-    }
 }
 
 /// Borderless, resizable from its edges, moved by dragging anywhere that isn't text.
@@ -117,14 +114,18 @@ final class CanvasPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-final class Canvas {
+/// Your size (set by resizing it) is the default. A long reply grows the card downward to fit; the next
+/// shorter one brings it back to your size.
+final class Canvas: NSObject, NSWindowDelegate {
     let m = CanvasModel()
     private var panel: CanvasPanel?
-    private static let enabledKey = "canvasEnabled"
+    private static let enabledKey = "canvasEnabled", frameKey = "canvasBaseFrame"
+    private var base = NSRect.zero                 // your size and spot (top edge stays put)
+    private var programmatic = false
+    private var needed: CGFloat = 0
     var enabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
 
     func restore() { if enabled { show() } }
-
     func toggle() { enabled ? hide() : show() }
 
     func show() {
@@ -136,18 +137,48 @@ final class Canvas {
             p.level = .floating
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
             p.isMovableByWindowBackground = true
-            p.minSize = NSSize(width: 220, height: 120)
-            let host = NSHostingView(rootView: SpeechCanvasView(m: m) { [weak self] in self?.hide() })
-            p.contentView = host
-            if !p.setFrameUsingName("VoicePetCanvas") {             // first time: top right, under the menu bar
+            p.minSize = NSSize(width: 220, height: 80)
+            p.contentView = NSHostingView(rootView: SpeechCanvasView(m: m) { [weak self] in self?.hide() })
+            p.delegate = self
+            if let s = UserDefaults.standard.string(forKey: Self.frameKey) { base = NSRectFromString(s) }
+            if base.width < 100 {                                     // first time: top right, under the menu bar
                 let s = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
-                p.setFrame(NSRect(x: s.maxX - 340 - 16, y: s.maxY - 240 - 12, width: 340, height: 240), display: true)
+                base = NSRect(x: s.maxX - 340 - 16, y: s.maxY - 160 - 12, width: 340, height: 160)
             }
-            p.setFrameAutosaveName("VoicePetCanvas")
+            set(base, animate: false)
             panel = p
+            m.onNeeded = { [weak self] h in self?.fit(h) }
         }
         panel?.orderFrontRegardless()
         m.shown = true
+    }
+
+    private func set(_ r: NSRect, animate: Bool) {
+        programmatic = true
+        panel?.setFrame(r, display: true, animate: animate)
+        programmatic = false
+    }
+
+    /// Grow to fit the text, never below your size; keep the top edge where it is.
+    private func fit(_ h: CGFloat) {
+        needed = h
+        guard let p = panel, !p.inLiveResize else { return }        // you're resizing it: wait till you let go
+        let top = p.frame.maxY
+        var height = max(base.height, ceil(h) + 4)
+        if let s = p.screen?.visibleFrame { height = min(height, top - s.minY - 8) }   // never past the bottom of the screen
+        guard abs(height - p.frame.height) > 1 else { return }
+        set(NSRect(x: p.frame.minX, y: top - height, width: p.frame.width, height: height), animate: true)
+    }
+
+    // you moved or resized it: that's the new default
+    func windowDidMove(_ n: Notification) { remember() }
+    func windowDidEndLiveResize(_ n: Notification) { remember(resized: true) }
+    private func remember(resized: Bool = false) {
+        guard !programmatic, let p = panel else { return }
+        let f = p.frame
+        base = resized ? f : NSRect(x: f.minX, y: f.maxY - base.height, width: f.width, height: base.height)
+        UserDefaults.standard.set(NSStringFromRect(base), forKey: Self.frameKey)
+        if resized { fit(needed) }
     }
 
     func hide() {
