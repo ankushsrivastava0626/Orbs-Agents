@@ -788,14 +788,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var rOptDownAt: Date?
     private var rLastTapAt: Date?
 
-    /// Double-tap right Option: reading → stop; text selected → read it aloud.
+    /// Double-tap right Option: read the selection aloud (replacing anything still being read).
     private func readSelection() {
-        if model.s.speaking_session == SelectionReader.session, model.s.speaking {
-            SelectionReader.stop(); return
-        }
-        SelectionReader.selectedText { [weak self] text in
-            guard self != nil, let t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return }
-            DispatchQueue.global().async { SelectionReader.read(t) }
+        // the newest double-tap always wins: whatever was being read stops, and the current selection is read
+        let reading = model.s.speaking_session == SelectionReader.session && model.s.speaking
+        SelectionReader.selectedText { text in
+            if let t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+                DispatchQueue.global().async { SelectionReader.read(t) }
+            } else if reading {
+                DispatchQueue.global().async { SelectionReader.stop() }   // nothing selected: just stop
+            }
         }
     }
 

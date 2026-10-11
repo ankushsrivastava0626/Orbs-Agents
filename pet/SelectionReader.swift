@@ -1,5 +1,5 @@
 // Select text anywhere, double-tap RIGHT Option: Joe (Gemini) reads exactly the selection out loud.
-// Double-tap again while it's reading to stop.
+// Double-tap again on a new selection and it reads that instead (the newest always wins).
 import AppKit
 import ApplicationServices
 
@@ -49,9 +49,15 @@ enum SelectionReader {
     }
 
     /// Hand it to the voice server in paragraph-sized pieces (so long passages are read in full, in order).
+    private static var generation = 0
+    private static let lock = NSLock()
+
     static func read(_ text: String) {
-        stop()
+        lock.lock(); generation += 1; let mine = generation; lock.unlock()
+        stop()                                                                        // waits: old reading is gone first
         for chunk in chunks(text) {
+            lock.lock(); let current = generation == mine; lock.unlock()
+            guard current else { return }                                             // a newer selection took over
             var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/say?kind=say&s=\(session)")!)
             req.httpMethod = "POST"; req.timeoutInterval = 3
             req.httpBody = chunk.data(using: .utf8)
@@ -61,10 +67,13 @@ enum SelectionReader {
         }
     }
 
+    /// Stop Joe and drop everything queued. Returns once the server has done it.
     static func stop() {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/stop")!)
         req.httpMethod = "POST"; req.timeoutInterval = 2
-        URLSession.shared.dataTask(with: req).resume()
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { _, _, _ in sem.signal() }.resume()
+        _ = sem.wait(timeout: .now() + 2)
     }
 
     static func chunks(_ text: String, max: Int = 700) -> [String] {
