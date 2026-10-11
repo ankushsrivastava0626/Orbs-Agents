@@ -536,7 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cardPanels: [KeyPanel] = []
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        DispatchQueue.main.async { [weak self] in self?.canvas.restore() }
+        DispatchQueue.main.async { [weak self] in self?.canvas.restore(); TaskTimer.shared.installStatusItem() }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon, never steals focus
         model.orbFrames = { [weak self] in self?.orbPanels.map(\.frame) ?? [] }
         model.onCardActive = { [weak self] visible, wantsKeys in

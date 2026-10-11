@@ -104,6 +104,7 @@ struct MenuBarView: View {
                     .frame(maxWidth: m.rightWidth - 260, alignment: .trailing)
                     .modifier(stagger(1))
                 connectivity.modifier(stagger(2))
+                TimerChip().overlay(AnchorReader { v, p in TaskTimer.shared.click(v, p) }).modifier(stagger(2))
                 Text(m.now, format: .dateTime.weekday(.abbreviated).hour().minute())
                     .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white).monospacedDigit()
                     .modifier(stagger(2))
@@ -152,6 +153,7 @@ struct MenuBarView: View {
                 toggle("waveform", on: m.auto, help: "Auto mode (hands-free)") { m.onAuto?() }
                 toggle("flashlight.on.fill", on: m.tunnel, help: "Tunnel vision") { m.onTunnel?() }
                 connectivity
+                TimerChip().overlay(AnchorReader { v, p in TaskTimer.shared.click(v, p) })
                 Text(m.now, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
                     .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white).monospacedDigit()
                 Image(systemName: "power").font(.system(size: 12, weight: .bold)).foregroundColor(.white.opacity(0.85))

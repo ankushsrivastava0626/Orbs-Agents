@@ -17,3 +17,4 @@ orb_names.json
 pet/VoicePet.app/Contents/MacOS/
 pet/VoicePet.app/Contents/_CodeSignature/
 cache/
+timelog/

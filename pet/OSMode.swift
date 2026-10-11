@@ -515,7 +515,7 @@ final class OSMode {
         let onScreen = m.x >= screen.minX && m.x <= screen.maxX
         let pinned = bar.appMode                                  // a full-screen box: its bar stays
         if !barShown, pinned || (onScreen && m.y >= screen.maxY - 0.5) { setBar(shown: true, p, screen) }
-        else if barShown, !pinned, !barMenuOpen, !(onScreen && m.y >= screen.maxY - barHeight - 6) { setBar(shown: false, p, screen) }
+        else if barShown, !pinned, !barMenuOpen, !TaskTimer.shared.busy, !(onScreen && m.y >= screen.maxY - barHeight - 6) { setBar(shown: false, p, screen) }
     }
 
     private func setBar(shown: Bool, _ p: NSPanel, _ screen: CGRect) {
