@@ -42,14 +42,30 @@ final class MenuBarModel: ObservableObject {
 /// Lets SwiftUI buttons find their NSView and position, to pop up an NSMenu right under them.
 struct AnchorReader: NSViewRepresentable {
     let onClick: (NSView, CGPoint) -> Void
-    func makeNSView(context: Context) -> NSView { ClickView(onClick: onClick) }
-    func updateNSView(_ v: NSView, context: Context) { (v as? ClickView)?.onClick = onClick }
+    var onRightClick: ((NSView, CGPoint) -> Void)? = nil     // two-finger click / control-click
+    init(onRightClick: ((NSView, CGPoint) -> Void)? = nil, _ onClick: @escaping (NSView, CGPoint) -> Void) {
+        self.onClick = onClick; self.onRightClick = onRightClick
+    }
+    init(onClick: @escaping (NSView, CGPoint) -> Void) { self.onClick = onClick }
+    func makeNSView(context: Context) -> NSView { ClickView(onClick: onClick, onRightClick: onRightClick) }
+    func updateNSView(_ v: NSView, context: Context) {
+        (v as? ClickView)?.onClick = onClick; (v as? ClickView)?.onRightClick = onRightClick
+    }
     final class ClickView: NSView {
         var onClick: (NSView, CGPoint) -> Void
-        init(onClick: @escaping (NSView, CGPoint) -> Void) { self.onClick = onClick; super.init(frame: .zero) }
+        var onRightClick: ((NSView, CGPoint) -> Void)?
+        init(onClick: @escaping (NSView, CGPoint) -> Void, onRightClick: ((NSView, CGPoint) -> Void)? = nil) {
+            self.onClick = onClick; self.onRightClick = onRightClick; super.init(frame: .zero)
+        }
         required init?(coder: NSCoder) { fatalError() }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-        override func mouseDown(with e: NSEvent) { onClick(self, NSPoint(x: 0, y: -4)) }
+        override func mouseDown(with e: NSEvent) {
+            if e.modifierFlags.contains(.control), let r = onRightClick { r(self, NSPoint(x: 0, y: -4)) }
+            else { onClick(self, NSPoint(x: 0, y: -4)) }
+        }
+        override func rightMouseDown(with e: NSEvent) {
+            if let r = onRightClick { r(self, NSPoint(x: 0, y: -4)) } else { super.rightMouseDown(with: e) }
+        }
     }
 }
 
@@ -104,7 +120,7 @@ struct MenuBarView: View {
                     .frame(maxWidth: m.rightWidth - 260, alignment: .trailing)
                     .modifier(stagger(1))
                 connectivity.modifier(stagger(2))
-                TimerChip().overlay(AnchorReader { v, p in TaskTimer.shared.click(v, p) }).modifier(stagger(2))
+                TimerChip().overlay(AnchorReader(onRightClick: { v, p in TaskTimer.shared.historyMenu(v, p) }) { v, p in TaskTimer.shared.click(v, p) }).modifier(stagger(2))
                 Text(m.now, format: .dateTime.weekday(.abbreviated).hour().minute())
                     .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white).monospacedDigit()
                     .modifier(stagger(2))
@@ -153,7 +169,7 @@ struct MenuBarView: View {
                 toggle("waveform", on: m.auto, help: "Auto mode (hands-free)") { m.onAuto?() }
                 toggle("flashlight.on.fill", on: m.tunnel, help: "Tunnel vision") { m.onTunnel?() }
                 connectivity
-                TimerChip().overlay(AnchorReader { v, p in TaskTimer.shared.click(v, p) })
+                TimerChip().overlay(AnchorReader(onRightClick: { v, p in TaskTimer.shared.historyMenu(v, p) }) { v, p in TaskTimer.shared.click(v, p) })
                 Text(m.now, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
                     .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white).monospacedDigit()
                 Image(systemName: "power").font(.system(size: 12, weight: .bold)).foregroundColor(.white.opacity(0.85))

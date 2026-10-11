@@ -174,13 +174,105 @@ final class TaskTimer: ObservableObject {
         menuOpen = false
     }
 
+    // MARK: two-finger click: everything saved
+
+    /// Past tasks, newest first (from sessions.jsonl).
+    static func history() -> [[String: Any]] {
+        guard let s = try? String(contentsOfFile: dir + "/sessions.jsonl", encoding: .utf8) else { return [] }
+        return s.split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }.reversed()
+    }
+
+    func historyMenu(_ v: NSView, _ pt: CGPoint) {
+        let m = NSMenu(); m.autoenablesItems = false
+        let all = Self.history()
+        let iso = ISO8601DateFormatter()
+        let day = DateFormatter(); day.dateFormat = "EEE, MMM d"
+        let clock = DateFormatter(); clock.dateFormat = "h:mm a"
+        func date(_ v: Any?) -> Date? { (v as? String).flatMap { iso.date(from: $0) } }
+        func secs(_ v: Any?) -> Double { Double((v as? Int) ?? 0) }
+
+        // totals
+        let cal = Calendar.current
+        let today = all.filter { date($0["start"]).map { cal.isDateInToday($0) } ?? false }.reduce(0) { $0 + secs($1["worked_seconds"]) }
+        let week = all.filter { date($0["start"]).map { cal.isDate($0, equalTo: Date(), toGranularity: .weekOfYear) } ?? false }
+                      .reduce(0) { $0 + secs($1["worked_seconds"]) }
+        let head = NSMenuItem(title: "Today \(Self.dur(today)) · This week \(Self.dur(week)) · \(all.count) task\(all.count == 1 ? "" : "s") saved",
+                              action: nil, keyEquivalent: ""); head.isEnabled = false
+        m.addItem(head)
+        m.addItem(.separator())
+
+        if all.isEmpty {
+            let e = NSMenuItem(title: "Nothing saved yet", action: nil, keyEquivalent: ""); e.isEnabled = false; m.addItem(e)
+        }
+        var lastDay = ""
+        for t in all.prefix(40) {
+            guard let start = date(t["start"]) else { continue }
+            let d = day.string(from: start)
+            if d != lastDay {                                       // group by day
+                lastDay = d
+                let h = NSMenuItem(title: cal.isDateInToday(start) ? "Today" : cal.isDateInYesterday(start) ? "Yesterday" : d,
+                                   action: nil, keyEquivalent: ""); h.isEnabled = false
+                m.addItem(h)
+            }
+            let name = t["name"] as? String ?? "Task"
+            let item = NSMenuItem(title: "\(name)  ·  \(Self.dur(secs(t["worked_seconds"])))", action: nil, keyEquivalent: "")
+            let sub = NSMenu(); sub.autoenablesItems = false
+            func info(_ s: String) { let i = NSMenuItem(title: s, action: nil, keyEquivalent: ""); i.isEnabled = false; sub.addItem(i) }
+            let end = date(t["end"])
+            info("\(day.string(from: start)), \(clock.string(from: start)) → \(end.map { clock.string(from: $0) } ?? "?")")
+            info("Worked \(Self.dur(secs(t["worked_seconds"]))) · paused \(Self.dur(secs(t["paused_seconds"]))) · total \(Self.dur(secs(t["total_seconds"])))")
+            let pauses = t["pauses"] as? [[String: Any]] ?? []
+            if !pauses.isEmpty {
+                sub.addItem(.separator()); info("Pauses")
+                for p in pauses {
+                    let ps = date(p["start"]).map { clock.string(from: $0) } ?? "?", pe = date(p["end"]).map { clock.string(from: $0) } ?? "?"
+                    info("   \(ps) → \(pe)  (\(Self.dur(secs(p["seconds"]))))")
+                }
+            }
+            let apps = t["apps"] as? [[String: Any]] ?? []
+            if !apps.isEmpty {
+                sub.addItem(.separator()); info("Apps")
+                for a in apps.prefix(12) { info("   \(a["app"] as? String ?? "?")  \(Self.dur(secs(a["seconds"])))") }
+            }
+            sub.addItem(.separator())
+            sub.addItem(ActionItem("Start again with this name") { [weak self] in
+                guard let self, self.run == nil else { return }
+                self.start(name)
+            })
+            item.submenu = sub
+            m.addItem(item)
+        }
+        if all.count > 40 {
+            let more = NSMenuItem(title: "…\(all.count - 40) older in the time log", action: nil, keyEquivalent: ""); more.isEnabled = false
+            m.addItem(more)
+        }
+        m.addItem(.separator())
+        if run != nil {
+            m.addItem(ActionItem(run!.paused ? "Resume current task" : "Pause current task") { [weak self] in self?.togglePause() })
+            m.addItem(ActionItem("Stop and save current task") { [weak self] in self?.stop() })
+        } else {
+            m.addItem(ActionItem("Start a task…") { [weak self] in self?.askName(below: v) })
+        }
+        m.addItem(.separator())
+        m.addItem(ActionItem("Open time log") { Self.openLog() })
+        m.addItem(ActionItem("Open data file (sessions.jsonl)") {
+            let p = Self.dir + "/sessions.jsonl"
+            if !FileManager.default.fileExists(atPath: p) { FileManager.default.createFile(atPath: p, contents: nil) }
+            NSWorkspace.shared.open(URL(fileURLWithPath: p))
+        })
+        m.addItem(ActionItem("Show in Finder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: Self.dir) })
+        menuOpen = true
+        m.popUp(positioning: nil, at: pt, in: v)
+        menuOpen = false
+    }
+
     static func openLog() {
         let path = dir + "/timelog.md"
         if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: Data("# Time log\n".utf8)) }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
     }
 
-    private func askName(below v: NSView) {
+    func askName(below v: NSView) {
         guard let w = v.window else { return }
         let r = w.convertToScreen(v.convert(v.bounds, to: nil))
         askName(at: NSPoint(x: r.midX, y: r.minY - 6))
@@ -220,11 +312,16 @@ final class TaskTimer: ObservableObject {
         let s = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         s.button?.target = self
         s.button?.action = #selector(statusClick(_:))
+        s.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusItem = s
         updateStatusItem()
     }
 
     @objc private func statusClick(_ b: NSStatusBarButton) {
+        let e = NSApp.currentEvent
+        if e?.type == .rightMouseUp || e?.modifierFlags.contains(.control) == true {
+            historyMenu(b, NSPoint(x: 0, y: b.bounds.height + 4)); return
+        }
         if run == nil { askName(below: b) } else { showMenu(b, NSPoint(x: 0, y: b.bounds.height + 4)) }
     }
 
