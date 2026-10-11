@@ -762,6 +762,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let others = f & (0x00100000 | 0x00040000 | 0x00020000) != 0 // ⌘ ⌃ ⇧ held: not a plain tap
         let now = Date()
         watchCodexApproval()
+        // RIGHT Option double-tap: read the selected text aloud (again to stop)
+        let rightOpt = f & 0x00080000 != 0 && f & 0x40 != 0
+        if rightOpt, rOptDownAt == nil { rOptDownAt = now }
+        if !rightOpt, let down = rOptDownAt {
+            rOptDownAt = nil
+            if now.timeIntervalSince(down) < 0.28, !others {
+                if let last = rLastTapAt, now.timeIntervalSince(last) < 0.4 { rLastTapAt = nil; readSelection() }
+                else { rLastTapAt = now }
+            } else { rLastTapAt = nil }
+        }
         if leftOpt, optDownAt == nil { optDownAt = now; return }
         if !leftOpt, let down = optDownAt {
             optDownAt = nil
@@ -775,6 +785,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+    private var rOptDownAt: Date?
+    private var rLastTapAt: Date?
+
+    /// Double-tap right Option: reading → stop; text selected → read it aloud.
+    private func readSelection() {
+        if model.s.speaking_session == SelectionReader.session, model.s.speaking {
+            SelectionReader.stop(); return
+        }
+        SelectionReader.selectedText { [weak self] text in
+            guard self != nil, let t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return }
+            DispatchQueue.global().async { SelectionReader.read(t) }
+        }
+    }
+
     lazy var osMode: OSMode = {
         let o = OSMode()
         o.keyDown = { Self.cg.keyDown($0) }

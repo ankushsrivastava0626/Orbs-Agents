@@ -608,6 +608,7 @@ final class SessionsController: NSObject {
 
     /// Display name for a session's reply card header.
     func displayName(_ session: String) -> String {
+        if session == SelectionReader.session { return "Reading selection" }
         guard let e = entries.first(where: { $0.name == session }) else { return session }
         return (e.kind == "codex" ? "Codex · " : "Claude · ") + (OrbNames.get(e.id) ?? e.label ?? URL(fileURLWithPath: e.cwd).lastPathComponent)
     }
