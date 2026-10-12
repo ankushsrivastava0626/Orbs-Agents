@@ -1146,8 +1146,9 @@ final class OSMode {
         }
         box.frame = target
         log("box for pid \(pid): \(Int(target.width))x\(Int(target.height)) (window \(siblings + 1) of this app)")
-        if siblings == 0, !isFinder { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.declutter(pid) } }
-        if isFinder { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showFinderViews(pid) } }
+        // apps keep every view and setting as they are: nothing is hidden. Bars an older OS mode hid come back
+        // (Finder every time, other apps once).
+        if siblings == 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.restoreViews(pid, always: isFinder) } }
         refreshCanvas()
     }
 
@@ -1568,37 +1569,25 @@ final class OSMode {
 
     private func log(_ s: String) { FileHandle.standardError.write("os mode: \(s)\n".data(using: .utf8)!) }
 
-    // MARK: declutter (tablet-like): switch off each app's bars via its own View menu, undo on exit
+    // MARK: app views: OS mode never hides an app's bars; it only brings back ones an older version hid
 
     private static let hideTitles = ["Hide Toolbar", "Hide Sidebar", "Hide Tab Bar", "Hide Status Bar",
                                      "Hide Path Bar", "Hide Bookmarks Bar", "Hide Favorites Bar", "Hide Ruler",
                                      "Hide Format Bar", "Hide Navigator", "Hide Inspector", "Hide Library"]
     private var decluttered: [(pid_t, String)] = []
 
-    private func declutter(_ pid: pid_t) {
-        guard on else { return }
+    /// Bring back the bars an older OS mode switched off (toolbar, sidebar, path/status/favorites bar).
+    private func restoreViews(_ pid: pid_t, always: Bool) {
+        guard let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return }
+        let key = "viewsRestored." + bundle
+        if !always, UserDefaults.standard.bool(forKey: key) { return }
+        UserDefaults.standard.set(true, forKey: key)
         let app = AXUIElementCreateApplication(pid)
-        var n = 0
-        for item in menuItems(app) {
-            guard let title = attr(item, kAXTitleAttribute) as? String, Self.hideTitles.contains(title),
-                  (attr(item, kAXEnabledAttribute) as? Bool) == true,
-                  !decluttered.contains(where: { $0.0 == pid && $0.1 == title }) else { continue }
-            if AXUIElementPerformAction(item, kAXPressAction as CFString) == .success {
-                decluttered.append((pid, title)); n += 1
-            }
-        }
-        let titles = menuItems(app).compactMap { attr($0, kAXTitleAttribute) as? String }.filter { $0.hasPrefix("Hide") || $0.hasPrefix("Show") }
-        log("declutter pid \(pid): hid \(n); hide/show items seen: \(titles.prefix(12))")
-    }
-
-    /// Finder in full: bring back the toolbar, sidebar, path bar and status bar (hidden by an older OS mode).
-    private func showFinderViews(_ pid: pid_t) {
-        let app = AXUIElementCreateApplication(pid)
-        for want in ["Show Toolbar", "Show Sidebar", "Show Path Bar", "Show Status Bar"] {
+        for want in ["Show Toolbar", "Show Sidebar", "Show Path Bar", "Show Status Bar", "Show Favorites Bar"] {
             for item in menuItems(app) where (attr(item, kAXTitleAttribute) as? String) == want
                                            && (attr(item, kAXEnabledAttribute) as? Bool) == true {
                 AXUIElementPerformAction(item, kAXPressAction as CFString)
-                log("finder: \(want)")
+                log("restored \(bundle): \(want)")
                 break
             }
         }
