@@ -41,12 +41,19 @@ final class DockModel: ObservableObject {
 /// Remembers where each orb is on screen, so a speech bubble can point at it.
 final class OrbAnchors {
     static let shared = OrbAnchors()
-    private var views: [String: WeakView] = [:]
+    private var views: [String: [WeakView]] = [:]      // the same orb can sit in the dock and in the corner strip
     final class WeakView { weak var v: NSView?; init(_ v: NSView) { self.v = v } }
-    func set(_ id: String, _ v: NSView) { views[id] = WeakView(v) }
+    func set(_ id: String, _ v: NSView) {
+        var list = (views[id] ?? []).filter { $0.v != nil && $0.v !== v }
+        list.append(WeakView(v)); views[id] = list
+    }
+    /// Where the orb is showing right now (whichever copy is visible).
     func screenRect(_ id: String) -> NSRect? {
-        guard let v = views[id]?.v, let w = v.window, w.isVisible, w.alphaValue > 0.01 else { return nil }
-        return w.convertToScreen(v.convert(v.bounds, to: nil))
+        for wv in (views[id] ?? []).reversed() {
+            guard let v = wv.v, let w = v.window, w.isVisible, w.alphaValue > 0.01 else { continue }
+            return w.convertToScreen(v.convert(v.bounds, to: nil))
+        }
+        return nil
     }
 }
 

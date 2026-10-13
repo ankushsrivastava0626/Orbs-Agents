@@ -720,12 +720,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// In OS mode the corner orb (and its hover card) is invisible and click-through — the dock has the orbs.
     /// Alpha instead of hiding, so other code bringing windows forward can't make it reappear.
+    lazy var orbStrip = OrbStrip(osMode.dock)
+
+    /// The single corner orb is replaced by the strip of every orb (bottom right) outside OS mode,
+    /// and by the dock inside it.
     func applyCornerOrbVisibility() {
-        let hide = osMode.on
         for p in panels where !(cardPanels.contains { $0 === p }) {   // the notes card stays available
-            p.alphaValue = hide ? 0 : 1
-            if orbPanels.contains(where: { $0 === p }) { p.ignoresMouseEvents = hide }
+            p.alphaValue = 0
+            if orbPanels.contains(where: { $0 === p }) { p.ignoresMouseEvents = true }
         }
+        if osMode.on { orbStrip.hide() } else { orbStrip.show() }
     }
     @objc func codexAuto() { codexModel.toggleAuto() }
     lazy var sessions = SessionsController(main: model, codex: codexModel, app: self)
