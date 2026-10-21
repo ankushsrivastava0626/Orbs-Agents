@@ -1,14 +1,53 @@
-// A focus timer that's always on screen (1, 2 or 10 minutes). Click: start / pause. When it's done every
-// screen goes dark except the timer, which glows and shakes: click it to start again, or the red +30 for
-// thirty more seconds. Finished timers and +30s are counted separately. Two-finger click: length, counts.
+// A focus timer that's always on screen (any length you set). Click: start / pause. When it's done every
+// screen goes dark except the timer, which glows and shakes: click it to start again, or the red +extra
+// for a little more time (you set it too). Finished timers and extras are counted per timer length. Two-finger click: length, counts.
 import AppKit
 import SwiftUI
 
 final class PomodoroModel: ObservableObject {
-    @Published var minutes: Int = { let v = UserDefaults.standard.integer(forKey: "pomodoroMinutes"); return v > 0 ? v : 10 }() {
-        didSet { UserDefaults.standard.set(minutes, forKey: "pomodoroMinutes"); if !running && !ringing { reset() } }
+    /// The timer's length and the extra's length, in seconds (you set both).
+    @Published var seconds: Int = {
+        let d = UserDefaults.standard
+        if d.integer(forKey: "pomodoroSeconds") > 0 { return d.integer(forKey: "pomodoroSeconds") }
+        return (d.integer(forKey: "pomodoroMinutes") > 0 ? d.integer(forKey: "pomodoroMinutes") : 10) * 60
+    }() {
+        didSet { UserDefaults.standard.set(seconds, forKey: "pomodoroSeconds"); if !running && !ringing { reset() } }
     }
-    var length: Double { extra ? 30 : Double(minutes) * 60 }
+    @Published var extraSeconds: Int = { let v = UserDefaults.standard.integer(forKey: "pomodoroExtraSeconds"); return v > 0 ? v : 30 }() {
+        didSet { UserDefaults.standard.set(extraSeconds, forKey: "pomodoroExtraSeconds") }
+    }
+    var length: Double { Double(extra ? extraSeconds : seconds) }
+    var extraLabel: String { "+" + Self.short(extraSeconds) }
+
+    /// Finished timers and extras used, per timer length ("600" = the 10-minute timer).
+    @Published var byLength: [String: Int] = (UserDefaults.standard.dictionary(forKey: "pomodoroByLength") as? [String: Int]) ?? [:] {
+        didSet { UserDefaults.standard.set(byLength, forKey: "pomodoroByLength") }
+    }
+    @Published var extrasByLength: [String: Int] = (UserDefaults.standard.dictionary(forKey: "pomodoroExtrasByLength") as? [String: Int]) ?? [:] {
+        didSet { UserDefaults.standard.set(extrasByLength, forKey: "pomodoroExtrasByLength") }
+    }
+    var doneHere: Int { byLength[String(seconds)] ?? 0 }
+    var extrasHere: Int { extrasByLength[String(seconds)] ?? 0 }
+
+    /// 600 → "10m", 90 → "1m 30s", 45 → "45s"
+    static func short(_ s: Int) -> String {
+        let m = s / 60, r = s % 60
+        return m == 0 ? "\(r)s" : r == 0 ? "\(m)m" : "\(m)m \(r)s"
+    }
+
+    /// "25" = 25 minutes, "1:30" = 1 min 30 s, "90s" = 90 seconds, "2m" = 2 minutes.
+    static func parse(_ text: String) -> Int? {
+        let t = text.lowercased().replacingOccurrences(of: " ", with: "")
+        if t.contains(":") {
+            let p = t.split(separator: ":").map { Int($0) }
+            guard p.count == 2, let m = p[0], let s = p[1] else { return nil }
+            return m * 60 + s
+        }
+        if t.hasSuffix("s"), let v = Int(t.dropLast()) { return v }
+        if t.hasSuffix("m"), let v = Double(t.dropLast()) { return Int(v * 60) }
+        if let v = Double(t) { return Int(v * 60) }
+        return nil
+    }
     @Published var left: Double = 0
     @Published var extra = false                      // running a +30 s extension
     @Published var extras = UserDefaults.standard.integer(forKey: "pomodoroExtras") {
@@ -29,7 +68,7 @@ final class PomodoroModel: ObservableObject {
     private var shaker: Timer?
 
     init() {
-        left = Double(minutes) * 60
+        left = Double(seconds)
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
     }
@@ -43,21 +82,22 @@ final class PomodoroModel: ObservableObject {
 
     private func start() { endsAt = Date().addingTimeInterval(left); running = true }
 
-    /// The red +30: thirty more seconds, counted on their own.
+    /// The red +extra: a little more time, counted on its own (against the timer it extended).
     func plusThirty() {
         stopRinging()
         extras += 1
-        extra = true; left = 30; start()
+        extrasByLength[String(seconds), default: 0] += 1
+        extra = true; left = Double(extraSeconds); start()
     }
 
-    func reset() { running = false; endsAt = nil; extra = false; left = Double(minutes) * 60 }
+    func reset() { running = false; endsAt = nil; extra = false; left = Double(seconds) }
 
     private func tick() {
         guard running, let e = endsAt else { return }
         left = max(0, e.timeIntervalSinceNow)
         if left <= 0 {
             running = false; endsAt = nil
-            if !extra { count += 1 }                     // a +30 isn't another timer
+            if !extra { count += 1; byLength[String(seconds), default: 0] += 1 }   // an extra isn't another timer
             ring()
         }
     }
@@ -98,17 +138,17 @@ struct PomodoroView: View {
                 .font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit()
                 .foregroundColor(.white.opacity(m.running || m.ringing ? 1 : 0.6))
             if m.ringing {
-                Text("+30").font(.system(size: 12, weight: .heavy, design: .rounded)).foregroundColor(.white)
+                Text(m.extraLabel).font(.system(size: 12, weight: .heavy, design: .rounded)).foregroundColor(.white)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(Color.red))
                     .overlay(AnchorReader { _, _ in m.plusThirty() })
-                    .help("30 more seconds")
+                    .help("\(PomodoroModel.short(m.extraSeconds)) more")
                     .transition(.scale.combined(with: .opacity))
             } else if m.extra {
-                Text("+30").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(.red.opacity(0.9))
+                Text(m.extraLabel).font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(.red.opacity(0.9))
             }
             if m.showCount {
-                Text("×\(m.count)" + (m.extras > 0 ? " · +30×\(m.extras)" : ""))
+                Text("×\(m.doneHere)" + (m.extrasHere > 0 ? " · +×\(m.extrasHere)" : ""))
                     .font(.system(size: 11, weight: .bold, design: .rounded)).monospacedDigit()
                     .foregroundColor(.white.opacity(0.55))
                     .padding(.horizontal, 6).padding(.vertical, 2)
@@ -129,8 +169,8 @@ struct PomodoroView: View {
         .animation(.easeInOut(duration: 0.3), value: m.ringing)
         .fixedSize()
         .padding(14)                                                     // room for the glow and the shake
-        .help(m.ringing ? "Click to start again, or +30 for thirty more seconds"
-              : m.running ? "Click to pause" : "Click to start a \(m.minutes)-minute timer")
+        .help(m.ringing ? "Click to start again, or \(m.extraLabel) for a little more"
+              : m.running ? "Click to pause" : "Click to start a \(PomodoroModel.short(m.seconds)) timer")
     }
 }
 
@@ -215,24 +255,71 @@ final class Pomodoro {
         }
     }
 
+    private func setLength(_ s: Int) {
+        m.seconds = s
+        if m.running || m.ringing { m.stopRinging(); m.reset() }
+    }
+
+    /// Ask for a time: "25" minutes, "1:30", "90s" or "2m".
+    private func ask(_ title: String, _ current: Int) -> Int? {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = "Minutes (25), minutes:seconds (1:30), or seconds (90s)."
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        f.stringValue = String(format: "%d:%02d", current / 60, current % 60)
+        a.accessoryView = f
+        a.addButton(withTitle: "Set"); a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn, let s = PomodoroModel.parse(f.stringValue), s >= 5, s <= 24 * 3600 else { return nil }
+        return s
+    }
+
     private func menu() -> NSMenu {
         let menu = NSMenu(); menu.autoenablesItems = false
-        let h = NSMenuItem(title: "\(m.count) timer\(m.count == 1 ? "" : "s") finished · +30 used \(m.extras)×", action: nil, keyEquivalent: "")
+        let h = NSMenuItem(title: "\(PomodoroModel.short(m.seconds)) timer: \(m.doneHere) finished · extra used \(m.extrasHere)×",
+                           action: nil, keyEquivalent: "")
         h.isEnabled = false; menu.addItem(h)
-        menu.addItem(.separator())
-        for n in [1, 2, 10] {
-            menu.addItem(ActionItem("\(n) minute\(n == 1 ? "" : "s")", checked: m.minutes == n) { [weak self] in
-                guard let self else { return }
-                self.m.minutes = n
-                if self.m.running || self.m.ringing { self.m.stopRinging(); self.m.reset() }
-            })
+        let all = NSMenuItem(title: "All counts (\(m.count) finished · extra \(m.extras)×)", action: nil, keyEquivalent: "")
+        let cs = NSMenu(); cs.autoenablesItems = false
+        let lens = Set(m.byLength.keys).union(m.extrasByLength.keys).compactMap { Int($0) }.sorted()
+        if lens.isEmpty { let e = NSMenuItem(title: "Nothing finished yet", action: nil, keyEquivalent: ""); e.isEnabled = false; cs.addItem(e) }
+        for s in lens {
+            let i = NSMenuItem(title: "\(PomodoroModel.short(s)) timer:  \(m.byLength[String(s)] ?? 0) finished · extra used \(m.extrasByLength[String(s)] ?? 0)×",
+                               action: nil, keyEquivalent: ""); i.isEnabled = false; cs.addItem(i)
         }
+        all.submenu = cs; menu.addItem(all)
+        menu.addItem(.separator())
+        let len = NSMenuItem(title: "Timer: \(PomodoroModel.short(m.seconds))", action: nil, keyEquivalent: "")
+        let ls = NSMenu(); ls.autoenablesItems = false
+        for s in [60, 120, 300, 600, 900, 1500] {
+            ls.addItem(ActionItem(PomodoroModel.short(s), checked: m.seconds == s) { [weak self] in self?.setLength(s) })
+        }
+        ls.addItem(.separator())
+        ls.addItem(ActionItem("Custom…") { [weak self] in
+            guard let self, let s = self.ask("Timer length", self.m.seconds) else { return }
+            self.setLength(s)
+        })
+        len.submenu = ls; menu.addItem(len)
+        let ext = NSMenuItem(title: "Extra time: \(PomodoroModel.short(m.extraSeconds))", action: nil, keyEquivalent: "")
+        let es = NSMenu(); es.autoenablesItems = false
+        for s in [15, 30, 60, 120, 300] {
+            es.addItem(ActionItem(PomodoroModel.short(s), checked: m.extraSeconds == s) { [weak self] in self?.m.extraSeconds = s })
+        }
+        es.addItem(.separator())
+        es.addItem(ActionItem("Custom…") { [weak self] in
+            guard let self, let s = self.ask("Extra time", self.m.extraSeconds) else { return }
+            self.m.extraSeconds = s
+        })
+        ext.submenu = es; menu.addItem(ext)
         menu.addItem(.separator())
         menu.addItem(ActionItem(m.running ? "Pause" : "Start") { [weak self] in self?.m.tap() })
-        menu.addItem(ActionItem("Restart from \(m.minutes):00") { [weak self] in self?.m.stopRinging(); self?.m.reset() })
+        menu.addItem(ActionItem("Restart from \(PomodoroModel.short(m.seconds))") { [weak self] in self?.m.stopRinging(); self?.m.reset() })
         menu.addItem(.separator())
         menu.addItem(ActionItem("Show count", checked: m.showCount) { [weak self] in self?.m.showCount.toggle() })
-        menu.addItem(ActionItem("Reset counts") { [weak self] in self?.m.count = 0; self?.m.extras = 0 })
+        menu.addItem(ActionItem("Reset counts") { [weak self] in
+            self?.m.count = 0; self?.m.extras = 0; self?.m.byLength = [:]; self?.m.extrasByLength = [:]
+        })
         return menu
     }
 }
