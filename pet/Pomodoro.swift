@@ -231,6 +231,7 @@ final class Pomodoro {
     }
 
     private var dark: [NSPanel] = []
+    private var keyMonitors: [Any] = []
 
     /// Time's up: every screen goes black except the timer, until you restart or take +30.
     private func darken(_ on: Bool) {
@@ -247,7 +248,14 @@ final class Pomodoro {
                 dark.append(d)
             }
             panel?.orderFrontRegardless()
+            // any key (space, anything) = back to the screen and start the next timer
+            let go: (NSEvent) -> Void = { [weak self] _ in
+                DispatchQueue.main.async { if self?.m.ringing == true { self?.m.tap() } }
+            }
+            if let g = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: go) { keyMonitors.append(g) }
+            if let l = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { go($0); return nil }) { keyMonitors.append(l) }
         } else {
+            keyMonitors.forEach { NSEvent.removeMonitor($0) }; keyMonitors = []
             let old = dark; dark = []
             for d in old {
                 NSAnimationContext.runAnimationGroup({ $0.duration = 0.45; d.animator().alphaValue = 0 }) { d.orderOut(nil) }
