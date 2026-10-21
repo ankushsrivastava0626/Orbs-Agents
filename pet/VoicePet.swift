@@ -536,7 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cardPanels: [KeyPanel] = []
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        DispatchQueue.main.async { [weak self] in self?.canvas.restore(); TaskTimer.shared.installStatusItem() }
+        DispatchQueue.main.async { [weak self] in self?.canvas.restore(); TaskTimer.shared.installStatusItem(); self?.pomodoro.show() }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon, never steals focus
         model.orbFrames = { [weak self] in self?.orbPanels.map(\.frame) ?? [] }
         model.onCardActive = { [weak self] visible, wantsKeys in
@@ -734,6 +734,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func codexAuto() { codexModel.toggleAuto() }
     lazy var sessions = SessionsController(main: model, codex: codexModel, app: self)
     let canvas = Canvas()
+    let pomodoro = Pomodoro()
     @objc func menuCanvas() { canvas.toggle() }
 
     /// Something an agent said: onto the canvas (if it's on).
