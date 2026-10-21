@@ -1,11 +1,20 @@
-// A 10-minute timer that's always on screen. Click: start / pause. Done: it glows and shakes (no sound).
-// Two-finger click: restart, show/hide how many you've finished, reset that count. Drag it anywhere.
+// A focus timer that's always on screen (1, 2 or 10 minutes). Click: start / pause. When it's done every
+// screen goes dark except the timer, which glows and shakes: click it to start again, or the red +30 for
+// thirty more seconds. Finished timers and +30s are counted separately. Two-finger click: length, counts.
 import AppKit
 import SwiftUI
 
 final class PomodoroModel: ObservableObject {
-    static let length: Double = 10 * 60
-    @Published var left: Double = PomodoroModel.length
+    @Published var minutes: Int = { let v = UserDefaults.standard.integer(forKey: "pomodoroMinutes"); return v > 0 ? v : 10 }() {
+        didSet { UserDefaults.standard.set(minutes, forKey: "pomodoroMinutes"); if !running && !ringing { reset() } }
+    }
+    var length: Double { extra ? 30 : Double(minutes) * 60 }
+    @Published var left: Double = 0
+    @Published var extra = false                      // running a +30 s extension
+    @Published var extras = UserDefaults.standard.integer(forKey: "pomodoroExtras") {
+        didSet { UserDefaults.standard.set(extras, forKey: "pomodoroExtras") }
+    }
+    var onRing: ((Bool) -> Void)?                     // screen goes dark / comes back
     @Published var running = false
     @Published var ringing = false
     @Published var shake = false
@@ -20,41 +29,50 @@ final class PomodoroModel: ObservableObject {
     private var shaker: Timer?
 
     init() {
+        left = Double(minutes) * 60
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(timer!, forMode: .common)
     }
 
+    /// Click: start / pause. When it's done: start the next timer right away.
     func tap() {
-        if ringing { stopRinging(); reset(); return }
+        if ringing { stopRinging(); reset(); start(); return }
         if running { left = max(0, (endsAt ?? Date()).timeIntervalSinceNow); running = false; endsAt = nil }
-        else { endsAt = Date().addingTimeInterval(left); running = true }
+        else { start() }
     }
 
-    func reset() { running = false; endsAt = nil; left = Self.length }
+    private func start() { endsAt = Date().addingTimeInterval(left); running = true }
+
+    /// The red +30: thirty more seconds, counted on their own.
+    func plusThirty() {
+        stopRinging()
+        extras += 1
+        extra = true; left = 30; start()
+    }
+
+    func reset() { running = false; endsAt = nil; extra = false; left = Double(minutes) * 60 }
 
     private func tick() {
         guard running, let e = endsAt else { return }
         left = max(0, e.timeIntervalSinceNow)
         if left <= 0 {
             running = false; endsAt = nil
-            count += 1
+            if !extra { count += 1 }                     // a +30 isn't another timer
             ring()
         }
     }
 
     private func ring() {
         ringing = true
+        onRing?(true)
         shaker?.invalidate()
-        var n = 0
         shaker = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: true) { [weak self] t in
             guard let self, self.ringing else { t.invalidate(); return }
-            self.shake.toggle()
-            n += 1
-            if n > 40 { self.stopRinging() }                          // keeps going ~35 s, or until you click
+            self.shake.toggle()                          // until you pick: restart or +30
         }
     }
 
-    func stopRinging() { ringing = false; shaker?.invalidate(); shaker = nil }
+    func stopRinging() { ringing = false; shaker?.invalidate(); shaker = nil; onRing?(false) }
 
     var label: String {
         let s = Int(left.rounded(.up))
@@ -68,7 +86,7 @@ struct PomodoroView: View {
         HStack(spacing: 8) {
             ZStack {
                 Circle().stroke(Color.white.opacity(0.12), lineWidth: 2.5)
-                Circle().trim(from: 0, to: m.left / PomodoroModel.length)
+                Circle().trim(from: 0, to: m.left / m.length)
                     .stroke(Color.white.opacity(m.running ? 0.9 : 0.45), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .animation(.linear(duration: 0.25), value: m.left)
@@ -79,8 +97,18 @@ struct PomodoroView: View {
             Text(m.ringing ? "Done" : m.label)
                 .font(.system(size: 14, weight: .semibold, design: .rounded)).monospacedDigit()
                 .foregroundColor(.white.opacity(m.running || m.ringing ? 1 : 0.6))
+            if m.ringing {
+                Text("+30").font(.system(size: 12, weight: .heavy, design: .rounded)).foregroundColor(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(Color.red))
+                    .overlay(AnchorReader { _, _ in m.plusThirty() })
+                    .help("30 more seconds")
+                    .transition(.scale.combined(with: .opacity))
+            } else if m.extra {
+                Text("+30").font(.system(size: 10, weight: .bold, design: .rounded)).foregroundColor(.red.opacity(0.9))
+            }
             if m.showCount {
-                Text("×\(m.count)")
+                Text("×\(m.count)" + (m.extras > 0 ? " · +30×\(m.extras)" : ""))
                     .font(.system(size: 11, weight: .bold, design: .rounded)).monospacedDigit()
                     .foregroundColor(.white.opacity(0.55))
                     .padding(.horizontal, 6).padding(.vertical, 2)
@@ -101,7 +129,8 @@ struct PomodoroView: View {
         .animation(.easeInOut(duration: 0.3), value: m.ringing)
         .fixedSize()
         .padding(14)                                                     // room for the glow and the shake
-        .help(m.running ? "Click to pause" : "Click to start a 10-minute timer")
+        .help(m.ringing ? "Click to start again, or +30 for thirty more seconds"
+              : m.running ? "Click to pause" : "Click to start a \(m.minutes)-minute timer")
     }
 }
 
@@ -147,7 +176,9 @@ final class Pomodoro {
             NSMenu.popUpContextMenu(self.menu(), with: e, for: h)
         }
         p.contentView = h
-        let size = NSSize(width: 200, height: 64)
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)   // above the dark screen
+        m.onRing = { [weak self] on in self?.darken(on) }
+        let size = NSSize(width: 260, height: 64)
         var origin: NSPoint
         if let s = UserDefaults.standard.string(forKey: "pomodoroOrigin") { origin = NSPointFromString(s) }
         else {                                                           // first time: bottom left
@@ -159,16 +190,49 @@ final class Pomodoro {
         panel = p
     }
 
+    private var dark: [NSPanel] = []
+
+    /// Time's up: every screen goes black except the timer, until you restart or take +30.
+    private func darken(_ on: Bool) {
+        if on {
+            for s in NSScreen.screens {
+                let d = NSPanel(contentRect: s.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                d.isOpaque = false; d.backgroundColor = .black; d.hasShadow = false
+                d.level = .screenSaver
+                d.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+                d.setFrame(s.frame, display: true)
+                d.alphaValue = 0
+                d.orderFrontRegardless()
+                NSAnimationContext.runAnimationGroup { $0.duration = 0.6; d.animator().alphaValue = 1 }
+                dark.append(d)
+            }
+            panel?.orderFrontRegardless()
+        } else {
+            let old = dark; dark = []
+            for d in old {
+                NSAnimationContext.runAnimationGroup({ $0.duration = 0.45; d.animator().alphaValue = 0 }) { d.orderOut(nil) }
+            }
+        }
+    }
+
     private func menu() -> NSMenu {
         let menu = NSMenu(); menu.autoenablesItems = false
-        let h = NSMenuItem(title: "\(m.count) ten-minute timer\(m.count == 1 ? "" : "s") finished", action: nil, keyEquivalent: "")
+        let h = NSMenuItem(title: "\(m.count) timer\(m.count == 1 ? "" : "s") finished · +30 used \(m.extras)×", action: nil, keyEquivalent: "")
         h.isEnabled = false; menu.addItem(h)
         menu.addItem(.separator())
+        for n in [1, 2, 10] {
+            menu.addItem(ActionItem("\(n) minute\(n == 1 ? "" : "s")", checked: m.minutes == n) { [weak self] in
+                guard let self else { return }
+                self.m.minutes = n
+                if self.m.running || self.m.ringing { self.m.stopRinging(); self.m.reset() }
+            })
+        }
+        menu.addItem(.separator())
         menu.addItem(ActionItem(m.running ? "Pause" : "Start") { [weak self] in self?.m.tap() })
-        menu.addItem(ActionItem("Restart from 10:00") { [weak self] in self?.m.stopRinging(); self?.m.reset() })
+        menu.addItem(ActionItem("Restart from \(m.minutes):00") { [weak self] in self?.m.stopRinging(); self?.m.reset() })
         menu.addItem(.separator())
         menu.addItem(ActionItem("Show count", checked: m.showCount) { [weak self] in self?.m.showCount.toggle() })
-        menu.addItem(ActionItem("Reset count") { [weak self] in self?.m.count = 0 })
+        menu.addItem(ActionItem("Reset counts") { [weak self] in self?.m.count = 0; self?.m.extras = 0 })
         return menu
     }
 }
