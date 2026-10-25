@@ -736,6 +736,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let canvas = Canvas()
     let pomodoro = Pomodoro()
     @objc func menuCanvas() { canvas.toggle() }
+    @objc func menuPomodoro() { pomodoro.toggleHidden() }
+
+    /// Quit completely: put the Mac's Dock and menu bar back, then unload the pet so it doesn't restart.
+    @objc func menuQuitPet() {
+        if osMode.on { osMode.toggle() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            p.arguments = ["bootout", "gui/\(getuid())/com.claude.voice-pet"]
+            try? p.run()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { NSApp.terminate(nil) }   // if not run by launchd
+        }
+    }
 
     /// Something an agent said: onto the canvas (if it's on).
     func toCanvas(_ id: String, _ session: String, _ text: String) {
@@ -1090,6 +1103,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item("Stop Claude (interrupt current task)", #selector(menuStopClaude))
         item("OS mode (double-tap left Option)", #selector(menuOSMode), on: osMode.on)
         item("Canvas (show what agents say)", #selector(menuCanvas), on: canvas.enabled)
+        item("Focus timer", #selector(menuPomodoro), on: !pomodoro.hidden)
         item("Tunnel vision (Esc to exit)", #selector(menuTunnel), on: !tunnelPanels.isEmpty)
         let shape = NSMenuItem(title: "Tunnel shape", action: nil, keyEquivalent: "")
         let sub = NSMenu()
@@ -1109,6 +1123,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         item("Show Claude session (Terminal)", #selector(menuShowClaude))
         item("Quit Claude session", #selector(menuQuitClaude))
+        menu.addItem(.separator())
+        item("Quit VoicePet", #selector(menuQuitPet))
     }
 
     func panel(_ rect: NSRect) -> NSPanel {

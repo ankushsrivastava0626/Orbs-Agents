@@ -203,6 +203,19 @@ final class Pomodoro {
     let m = PomodoroModel()
     private var panel: NSPanel?
 
+    var hidden: Bool { UserDefaults.standard.bool(forKey: "pomodoroHidden") }
+
+    /// Hide / show the timer (from any orb's menu). It keeps counting while hidden.
+    func toggleHidden() {
+        UserDefaults.standard.set(!hidden, forKey: "pomodoroHidden")
+        if hidden {
+            if let p = panel { NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; p.animator().alphaValue = 0 }) { p.orderOut(nil) } }
+        } else if let p = panel {
+            p.alphaValue = 0; p.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.3; p.animator().alphaValue = 1 }
+        } else { show() }
+    }
+
     func show() {
         guard panel == nil else { return }
         let p = FirstClickPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -226,8 +239,8 @@ final class Pomodoro {
             origin = NSPoint(x: v.minX + 4, y: v.minY + 2)
         }
         p.setFrame(NSRect(origin: origin, size: size), display: true)
-        p.orderFrontRegardless()
         panel = p
+        if !hidden { p.orderFrontRegardless() }
     }
 
     private var dark: [NSPanel] = []
@@ -247,6 +260,7 @@ final class Pomodoro {
                 NSAnimationContext.runAnimationGroup { $0.duration = 0.6; d.animator().alphaValue = 1 }
                 dark.append(d)
             }
+            panel?.alphaValue = 1
             panel?.orderFrontRegardless()
             // any key (space, anything) = back to the screen and start the next timer
             let go: (NSEvent) -> Void = { [weak self] _ in
@@ -256,6 +270,7 @@ final class Pomodoro {
             if let l = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { go($0); return nil }) { keyMonitors.append(l) }
         } else {
             keyMonitors.forEach { NSEvent.removeMonitor($0) }; keyMonitors = []
+            if hidden { panel?.orderOut(nil) }
             let old = dark; dark = []
             for d in old {
                 NSAnimationContext.runAnimationGroup({ $0.duration = 0.45; d.animator().alphaValue = 0 }) { d.orderOut(nil) }
