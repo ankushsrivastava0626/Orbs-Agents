@@ -1,4 +1,4 @@
-// Select text anywhere, double-tap RIGHT Option: Joe (Gemini) reads exactly the selection out loud.
+// Select text anywhere, double-tap RIGHT Command: Joe (Gemini) reads exactly the selection out loud.
 // Double-tap again on a new selection and it reads that instead (the newest always wins).
 import AppKit
 import ApplicationServices

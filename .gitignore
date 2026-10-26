@@ -19,3 +19,5 @@ pet/VoicePet.app/Contents/_CodeSignature/
 cache/
 timelog/
 run/
+meetings/
+meetings.db*

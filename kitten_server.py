@@ -326,6 +326,9 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps({"muted": STATUS["muted_sessions"]}).encode()); return
+        if self.path == "/meeting":          # pet: right Option double-tap → toggle meeting recording
+            (meeting_stop if MEETING["on"] else meeting_start)()
+            self._ok(json.dumps({"meeting": MEETING["on"], "folder": MEETING["folder"]}).encode()); return
         if self.path == "/ptt":              # pet: an orb's speak hotkey went down/up {"name","kind","down"}
             try:
                 ev = json.loads(body)
@@ -775,6 +778,79 @@ def warm_stt():
     print(f"stt: warm ({time.time() - t:.1f}s)", flush=True)
 
 threading.Thread(target=warm_stt, daemon=True).start()
+
+# ---- meetings: right Option double-tap starts/stops; mic only; transcribed with speaker labels ----
+MEETINGS = os.path.join(DIR, "meetings")
+MEETING = {"on": False, "started": 0, "folder": "", "stop": None}
+
+def meeting_start():
+    import soundfile as sf
+    if MEETING["on"]: return
+    folder = os.path.join(MEETINGS, time.strftime("%Y-%m-%d %H-%M-%S"))
+    os.makedirs(folder, exist_ok=True)
+    stop = threading.Event()
+    MEETING.update(on=True, started=time.time(), folder=folder, stop=stop)
+    STATUS.update(meeting=True, meeting_started=MEETING["started"], meeting_folder=folder)
+    def rec():
+        wav = os.path.join(folder, "audio.wav")
+        try:
+            with sf.SoundFile(wav, "w", samplerate=16000, channels=1, subtype="PCM_16") as f:
+                def cb(d, frames, t, st): f.write(d.copy())
+                with sd.InputStream(device=mic_device(), samplerate=16000, channels=1, dtype="float32", callback=cb):
+                    while not stop.wait(0.5): pass
+        except Exception as e:
+            print("meeting: recording failed:", repr(e), flush=True)
+        print("meeting: saved", wav, flush=True)
+        meeting_transcribe(folder, wav)
+    threading.Thread(target=rec, daemon=True).start()
+    STATUS["meeting_transcribing"] = False
+    print("meeting: recording to", folder, flush=True)
+
+def meeting_stop():
+    if not MEETING["on"]: return
+    MEETING["on"] = False
+    MEETING["stop"].set()
+    STATUS.update(meeting=False, meeting_transcribing=True)
+
+MEETING_DB = os.path.join(DIR, "meetings.db")   # its own: never shares a lock with voice commands
+meeting_lock = threading.Lock()                  # one meeting transcribed at a time
+
+def meeting_transcribe(folder, wav):
+    """One speaker-labelled pass; writes transcript.txt (readable), transcript.srt and transcript.json."""
+    import subprocess
+    STATUS["meeting_transcribing"] = True
+    t = time.time()
+    try:
+        with meeting_lock:
+            out = subprocess.run([STT_CLI, "transcribe", wav, "--format", "json", "--speaker-detection", "on",
+                                  "--engine", "parakeet", "--no-history", "--database", MEETING_DB],
+                                 capture_output=True, text=True, timeout=3 * 3600).stdout
+        open(os.path.join(folder, "transcript.json"), "w").write(out)
+        d = json.loads(out)
+        segs = d.get("transcriptSegments") or []
+        def ts(ms, srt=False):
+            s, ms = divmod(int(ms), 1000); h, s = divmod(s, 3600); m, s = divmod(s, 60)
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}" if srt else (f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}")
+        started = os.path.basename(folder)
+        lines = [f"Meeting {started}", f"{d.get('speakerCount', 0)} speaker(s) · {ts(d.get('durationMs', 0))} long", ""]
+        last = None
+        for g in segs:                                   # a new paragraph whenever the speaker changes
+            who = g.get("speakerLabel") or "Speaker"
+            if who != last: lines += ["", f"[{ts(g.get('startMs', 0))}] {who}:"]; last = who
+            lines.append(g.get("text", "").strip())
+        if not segs: lines.append(d.get("rawTranscript", "").strip() or "(no speech found)")
+        open(os.path.join(folder, "transcript.txt"), "w").write("\n".join(lines).strip() + "\n")
+        srt = []
+        for i, g in enumerate(segs, 1):
+            srt += [str(i), f"{ts(g.get('startMs', 0), True)} --> {ts(g.get('endMs', 0), True)}",
+                    f"{g.get('speakerLabel', '')}: {g.get('text', '').strip()}", ""]
+        open(os.path.join(folder, "transcript.srt"), "w").write("\n".join(srt))
+        print(f"meeting: transcribed in {time.time() - t:.0f}s ->", folder, flush=True)
+        STATUS.update(meeting_done=folder, meeting_done_at=time.time())
+    except Exception as e:
+        print("meeting: transcription failed:", repr(e), flush=True)
+    finally:
+        STATUS["meeting_transcribing"] = False
 
 WATCH = {"beat": time.time()}
 

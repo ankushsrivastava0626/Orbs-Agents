@@ -34,6 +34,7 @@ struct Status: Codable {
     var captions: [Caption] = []
     var last_said: [String: Caption] = [:]                // each orb's last reply, spoken or muted
     var muted = false, muted_text = "", muted_at = 0.0    // Codex: its own mute + last muted reply
+    var meeting = false, meeting_started = 0.0, meeting_transcribing = false, meeting_done = "", meeting_done_at = 0.0
 
     init() {}
 
@@ -63,6 +64,9 @@ struct Status: Codable {
         sessions = g("sessions", [:]); thread_id = g("thread_id", "")
         muted_sessions = g("muted_sessions", []); captions = g("captions", []); last_said = g("last_said", [:])
         muted = g("muted", false); muted_text = g("muted_text", ""); muted_at = g("muted_at", 0.0)
+        meeting = g("meeting", false); meeting_started = g("meeting_started", 0.0)
+        meeting_transcribing = g("meeting_transcribing", false)
+        meeting_done = g("meeting_done", ""); meeting_done_at = g("meeting_done_at", 0.0)
         if let p: CodexPending = g("pending", nil) { approvalId = p.request_id; approvalDetail = p.detail; approvalMethod = p.method }
     }
 }
@@ -536,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cardPanels: [KeyPanel] = []
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        DispatchQueue.main.async { [weak self] in self?.canvas.restore(); TaskTimer.shared.installStatusItem(); self?.pomodoro.show() }
+        DispatchQueue.main.async { [weak self] in self?.canvas.restore(); TaskTimer.shared.installStatusItem(); self?.pomodoro.show(); self?.meetingBadge.show() }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon, never steals focus
         model.orbFrames = { [weak self] in self?.orbPanels.map(\.frame) ?? [] }
         model.onCardActive = { [weak self] visible, wantsKeys in
@@ -737,6 +741,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let pomodoro = Pomodoro()
     @objc func menuCanvas() { canvas.toggle() }
     @objc func menuPomodoro() { pomodoro.toggleHidden() }
+    @objc func menuMeeting() { toggleMeeting() }
+    @objc func menuOpenMeetings() {
+        let d = voiceDir + "/meetings"
+        try? FileManager.default.createDirectory(atPath: d, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(URL(fileURLWithPath: d))
+    }
 
     /// Quit completely: put the Mac's Dock and menu bar back, then unload the pet so it doesn't restart.
     @objc func menuQuitPet() {
@@ -780,15 +790,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let others = f & (0x00100000 | 0x00040000 | 0x00020000) != 0 // ⌘ ⌃ ⇧ held: not a plain tap
         let now = Date()
         watchCodexApproval()
-        // RIGHT Option double-tap: read the selected text aloud (again to stop)
+        // RIGHT Option double-tap: start / stop recording a meeting
         let rightOpt = f & 0x00080000 != 0 && f & 0x40 != 0
         if rightOpt, rOptDownAt == nil { rOptDownAt = now }
         if !rightOpt, let down = rOptDownAt {
             rOptDownAt = nil
             if now.timeIntervalSince(down) < 0.28, !others {
-                if let last = rLastTapAt, now.timeIntervalSince(last) < 0.4 { rLastTapAt = nil; readSelection() }
+                if let last = rLastTapAt, now.timeIntervalSince(last) < 0.4 { rLastTapAt = nil; toggleMeeting() }
                 else { rLastTapAt = now }
             } else { rLastTapAt = nil }
+        }
+        // RIGHT Command double-tap: read the selected text aloud
+        let rightCmd = f & 0x00100000 != 0 && f & 0x10 != 0
+        let notCmd = f & (0x00080000 | 0x00040000 | 0x00020000) != 0
+        if rightCmd, rCmdDownAt == nil { rCmdDownAt = now }
+        if !rightCmd, let down = rCmdDownAt {
+            rCmdDownAt = nil
+            if now.timeIntervalSince(down) < 0.28, !notCmd {
+                if let last = rCmdLastTapAt, now.timeIntervalSince(last) < 0.4 { rCmdLastTapAt = nil; readSelection() }
+                else { rCmdLastTapAt = now }
+            } else { rCmdLastTapAt = nil }
         }
         if leftOpt, optDownAt == nil { optDownAt = now; return }
         if !leftOpt, let down = optDownAt {
@@ -805,8 +826,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private var rOptDownAt: Date?
     private var rLastTapAt: Date?
+    private var rCmdDownAt: Date?
+    private var rCmdLastTapAt: Date?
+    lazy var meetingBadge = MeetingBadge(model)
 
-    /// Double-tap right Option: read the selection aloud (replacing anything still being read).
+    func toggleMeeting() {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/meeting")!)
+        req.httpMethod = "POST"; req.timeoutInterval = 3; req.httpBody = Data("{}".utf8)
+        URLSession.shared.dataTask(with: req).resume()
+        meetingBadge.show()
+    }
+
+    /// Double-tap right Command: read the selection aloud (replacing anything still being read).
     private func readSelection() {
         // the newest double-tap always wins: whatever was being read stops, and the current selection is read
         let reading = model.s.speaking_session == SelectionReader.session && model.s.speaking
@@ -1104,6 +1135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item("OS mode (double-tap left Option)", #selector(menuOSMode), on: osMode.on)
         item("Canvas (show what agents say)", #selector(menuCanvas), on: canvas.enabled)
         item("Focus timer", #selector(menuPomodoro), on: !pomodoro.hidden)
+        item(model.s.meeting ? "Stop recording meeting (right Option ×2)" : "Record meeting (right Option ×2)", #selector(menuMeeting))
+        item("Open meetings folder", #selector(menuOpenMeetings))
         item("Tunnel vision (Esc to exit)", #selector(menuTunnel), on: !tunnelPanels.isEmpty)
         let shape = NSMenuItem(title: "Tunnel shape", action: nil, keyEquivalent: "")
         let sub = NSMenu()
