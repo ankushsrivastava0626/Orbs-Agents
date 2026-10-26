@@ -865,8 +865,10 @@ def meeting_transcribe(folder, wav):
             out = subprocess.run([STT_CLI, "transcribe", wav, "--format", "json", "--speaker-detection", "on",
                                   "--engine", "parakeet", "--no-history", "--database", MEETING_DB],
                                  capture_output=True, text=True, timeout=3 * 3600).stdout
-        open(os.path.join(folder, "transcript.json"), "w").write(out)
         d = json.loads(out)
+        if d.get("ok") is False:                         # e.g. disk full: keep the audio, retry on next start
+            raise RuntimeError(d.get("error", "transcription failed")[:300])
+        open(os.path.join(folder, "transcript.json"), "w").write(out)
         segs = d.get("transcriptSegments") or []
         def ts(ms, srt=False):
             s, ms = divmod(int(ms), 1000); h, s = divmod(s, 3600); m, s = divmod(s, 60)
@@ -886,6 +888,9 @@ def meeting_transcribe(folder, wav):
                     f"{g.get('speakerLabel', '')}: {g.get('text', '').strip()}", ""]
         open(os.path.join(folder, "transcript.srt"), "w").write("\n".join(srt))
         print(f"meeting: transcribed in {time.time() - t:.0f}s ->", folder, flush=True)
+        for junk in (wav, os.path.join(folder, "recorder.log")):   # transcript saved: the audio isn't kept
+            try: os.remove(junk)
+            except OSError: pass
         STATUS.update(meeting_done=folder, meeting_done_at=time.time())
     except Exception as e:
         print("meeting: transcription failed:", repr(e), flush=True)
