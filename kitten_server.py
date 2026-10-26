@@ -4,6 +4,7 @@ POST /say   body=text  -> queued, spoken in order (sentence-pipelined)
 POST /stop             -> stop now and drop everything queued
 GET  /health
 """
+import signal, sys
 import os, re, queue, sys, threading
 sys.path.insert(0, os.path.expanduser("~/.claude/voice"))
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -783,34 +784,73 @@ threading.Thread(target=warm_stt, daemon=True).start()
 MEETINGS = os.path.join(DIR, "meetings")
 MEETING = {"on": False, "started": 0, "folder": "", "stop": None}
 
+ACTIVE = os.path.join(MEETINGS, "active.json")   # the recording in progress (survives a server restart)
+REC = os.path.join(DIR, "meeting_rec.py")
+
+def _alive(pid):
+    try: os.kill(pid, 0); return True
+    except OSError: return False
+
 def meeting_start():
-    import soundfile as sf
-    if MEETING["on"]: return
+    import subprocess
+    if MEETING["on"] or time.time() - MEETING.get("toggled", 0) < 1.5: return
+    MEETING["toggled"] = time.time()
     folder = os.path.join(MEETINGS, time.strftime("%Y-%m-%d %H-%M-%S"))
     os.makedirs(folder, exist_ok=True)
-    stop = threading.Event()
-    MEETING.update(on=True, started=time.time(), folder=folder, stop=stop)
+    proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
+                            stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
+                            start_new_session=True)            # its own process group: our restarts don't kill it
+    MEETING.update(on=True, started=time.time(), folder=folder, pid=proc.pid, proc=proc)
+    json.dump({"pid": proc.pid, "folder": folder, "started": MEETING["started"]}, open(ACTIVE, "w"))
     STATUS.update(meeting=True, meeting_started=MEETING["started"], meeting_folder=folder)
-    def rec():
-        wav = os.path.join(folder, "audio.wav")
-        try:
-            with sf.SoundFile(wav, "w", samplerate=16000, channels=1, subtype="PCM_16") as f:
-                def cb(d, frames, t, st): f.write(d.copy())
-                with sd.InputStream(device=mic_device(), samplerate=16000, channels=1, dtype="float32", callback=cb):
-                    while not stop.wait(0.5): pass
-        except Exception as e:
-            print("meeting: recording failed:", repr(e), flush=True)
-        print("meeting: saved", wav, flush=True)
-        meeting_transcribe(folder, wav)
-    threading.Thread(target=rec, daemon=True).start()
-    STATUS["meeting_transcribing"] = False
-    print("meeting: recording to", folder, flush=True)
+    print("meeting: recording to", folder, "pid", proc.pid, flush=True)
 
 def meeting_stop():
-    if not MEETING["on"]: return
+    if not MEETING["on"] or time.time() - MEETING.get("toggled", 0) < 1.5: return
+    MEETING["toggled"] = time.time()
     MEETING["on"] = False
-    MEETING["stop"].set()
+    pid, folder = MEETING["pid"], MEETING["folder"]
     STATUS.update(meeting=False, meeting_transcribing=True)
+    def finish():
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+        for _ in range(100):                              # let it close the file properly
+            if not _alive(pid): break
+            p = MEETING.get("proc")
+            if p: p.poll()
+            time.sleep(0.1)
+        try: os.unlink(ACTIVE)
+        except OSError: pass
+        wav = os.path.join(folder, "audio.wav")
+        subprocess_repair(wav)
+        print("meeting: saved", wav, flush=True)
+        meeting_transcribe(folder, wav)
+    threading.Thread(target=finish, daemon=True).start()
+
+def subprocess_repair(wav):
+    import subprocess
+    subprocess.run([sys.executable, os.path.join(DIR, "wav_repair.py"), wav], capture_output=True)
+
+def meeting_recover():
+    """After a restart: pick a recording that's still going back up, or finish one whose recorder died;
+    and transcribe any meeting that has audio but no transcript yet."""
+    try: a = json.load(open(ACTIVE))
+    except Exception: a = None
+    if a and _alive(a["pid"]):
+        MEETING.update(on=True, started=a["started"], folder=a["folder"], pid=a["pid"], proc=None)
+        STATUS.update(meeting=True, meeting_started=a["started"], meeting_folder=a["folder"])
+        print("meeting: still recording", a["folder"], flush=True)
+    elif a:
+        try: os.unlink(ACTIVE)
+        except OSError: pass
+    for d in sorted(os.listdir(MEETINGS)) if os.path.isdir(MEETINGS) else []:
+        f = os.path.join(MEETINGS, d)
+        wav = os.path.join(f, "audio.wav")
+        if MEETING["on"] and f == MEETING["folder"]: continue
+        if os.path.isfile(wav) and not os.path.exists(os.path.join(f, "transcript.txt")) and os.path.getsize(wav) > 32000:
+            subprocess_repair(wav)
+            print("meeting: transcribing leftover", f, flush=True)
+            meeting_transcribe(f, wav)
 
 MEETING_DB = os.path.join(DIR, "meetings.db")   # its own: never shares a lock with voice commands
 meeting_lock = threading.Lock()                  # one meeting transcribed at a time
@@ -866,6 +906,7 @@ def watchdog():
 
 threading.Thread(target=command_watch, daemon=True).start()
 threading.Thread(target=watchdog, daemon=True).start()
+threading.Thread(target=meeting_recover, daemon=True).start()
 threading.Thread(target=auto_listen, daemon=True).start()
 print("kitten server ready on", PORT, MODEL_NAME, flush=True)
 ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
