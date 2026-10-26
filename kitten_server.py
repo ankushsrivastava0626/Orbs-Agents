@@ -692,6 +692,7 @@ def command_watch():
     q.CGEventSourceKeyState.argtypes = [ctypes.c_int32, ctypes.c_uint16]
     held_since, stream, chunks = None, None, []
     while True:
+        WATCH["beat"] = time.time()
         fl = q.CGEventSourceFlagsState(1)
         # left Option only: Option mask + device-dependent left-Alt bit (NX_DEVICELALTKEYMASK 0x20; right is 0x40)
         if config().get("PTT_SOURCE", "pet") == "pet":
@@ -746,7 +747,20 @@ def drain_spool():
 
 drain_spool()
 threading.Thread(target=worker, daemon=True).start()
+WATCH = {"beat": time.time()}
+
+def watchdog():
+    """The recorder can get stuck inside the audio system (e.g. after a Gemini audio stall). If it stops
+    ticking, restart the whole server (launchd brings it straight back) so the mic works again."""
+    while True:
+        time.sleep(3)
+        stuck = time.time() - WATCH["beat"]
+        if stuck > 10:
+            print(f"watchdog: recorder stuck for {stuck:.0f}s; restarting the voice server", flush=True)
+            os._exit(1)
+
 threading.Thread(target=command_watch, daemon=True).start()
+threading.Thread(target=watchdog, daemon=True).start()
 threading.Thread(target=auto_listen, daemon=True).start()
 print("kitten server ready on", PORT, MODEL_NAME, flush=True)
 ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
