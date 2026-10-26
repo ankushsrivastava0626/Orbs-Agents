@@ -20,7 +20,7 @@ def load(p, default):
 def claude_file(sid, cwd):
     p = os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd or ""), sid + ".jsonl")
     if os.path.exists(p): return p
-    hits = glob.glob(os.path.join(PROJECTS, "*", sid + ".jsonl"))
+    hits = glob.glob(os.path.expanduser("~/.claude*/projects/*/" + sid + ".jsonl"))   # wrappers keep their own folder
     return hits[0] if hits else None
 
 

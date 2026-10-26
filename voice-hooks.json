@@ -1,0 +1,7 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "~/.claude/voice/event.sh Prompt flag", "timeout": 3}]}],
+    "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "~/.claude/voice/event.sh Step flag", "timeout": 3}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "~/.claude/voice/event.sh Stop flag", "timeout": 5}]}]
+  }
+}

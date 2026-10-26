@@ -10,10 +10,9 @@ PROJECTS = os.path.expanduser("~/.claude/projects")
 def jsonl(sid, cwd):
     p = os.path.join(PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd), sid + ".jsonl")
     if os.path.exists(p): return p
-    for d in os.listdir(PROJECTS):                      # fall back: search every project folder
-        q = os.path.join(PROJECTS, d, sid + ".jsonl")
-        if os.path.exists(q): return q
-    return None
+    import glob                                         # fall back: every project folder of every Claude config
+    hits = glob.glob(os.path.expanduser("~/.claude*/projects/*/" + sid + ".jsonl"))
+    return hits[0] if hits else None
 
 def user_text(e):
     c = e.get("message", {}).get("content")

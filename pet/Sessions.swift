@@ -371,6 +371,7 @@ final class SessionsController: NSObject {
         m.addItem(.separator())
         m.addItem(item("New Claude session", #selector(newClaude)))
         m.addItem(item("New Claude session in folder…", #selector(newClaudeInFolder)))
+        m.addItem(item("New orb with custom command…", #selector(newCustom)))
         m.addItem(.separator())
         m.addItem(item("New Codex session", #selector(newCodex), enabled: codex.online))
         m.addItem(item("New Codex session in folder…", #selector(newCodexInFolder), enabled: codex.online))
@@ -520,6 +521,35 @@ final class SessionsController: NSObject {
     private func newClaudeName() -> String { entries.contains { $0.name == "voice" } ? nextName("voice") : "voice" }
     @objc func newClaude() { startClaude(newClaudeName(), ["--fresh"]) }
     @objc func newClaudeInFolder() { if let f = pickFolder("New Claude voice session in folder") { startClaude(newClaudeName(), ["--fresh", "--cwd", f]) } }
+
+    /// Your own terminal command instead of `claude` (claude-openrouter, claude --model …, an alias…).
+    @objc func newCustom() {
+        let a = NSAlert()
+        a.messageText = "New orb with a custom command"
+        a.informativeText = "The command you'd type in Terminal to start the agent, e.g. claude-openrouter or claude --model opus. "
+            + "The orb adds its voice options to it, and keeps using it when it relaunches or resumes."
+        let box = NSStackView(frame: NSRect(x: 0, y: 0, width: 320, height: 58))
+        box.orientation = .vertical; box.alignment = .leading; box.spacing = 8
+        let f = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        f.placeholderString = "claude-openrouter"
+        f.stringValue = UserDefaults.standard.string(forKey: "lastCustomCommand") ?? ""
+        let folder = NSButton(checkboxWithTitle: "Choose a folder for it", target: nil, action: nil)
+        box.addArrangedSubview(f); box.addArrangedSubview(folder)
+        a.accessoryView = box
+        a.addButton(withTitle: "Start"); a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = f
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let cmd = f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cmd.isEmpty else { return }
+        UserDefaults.standard.set(cmd, forKey: "lastCustomCommand")
+        var args = ["--fresh", "--cmd", cmd]
+        if folder.state == .on {
+            guard let dir = pickFolder("Folder for “\(cmd)”") else { return }
+            args += ["--cwd", dir]
+        }
+        startClaude(newClaudeName(), args)
+    }
 
     private func startClaude(_ name: String, _ args: [String]) {
         DispatchQueue.global().async {
