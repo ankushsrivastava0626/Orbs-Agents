@@ -379,11 +379,28 @@ class H(BaseHTTPRequestHandler):
 STT_CLI = "/Applications/MacParakeet.app/Contents/MacOS/macparakeet-cli"
 STT_DB = os.path.join(DIR, "stt.db")      # keep voice commands out of MacParakeet's own history
 
+def trim_stt_db():
+    """MacParakeet saves every transcription in its database, and gets slower as it grows (36 s per
+    command at 5 MB, 0.3 s fresh). We don't need that history, so start a new one once it's big."""
+    try:
+        if os.path.getsize(STT_DB) > 1_500_000:
+            for ext in ("", "-wal", "-shm"):
+                if os.path.exists(STT_DB + ext): os.replace(STT_DB + ext, STT_DB + ".old" + ext)
+            print("stt: started a fresh transcription database", flush=True)
+    except OSError:
+        pass
+
 def transcribe(path):
     import subprocess
-    out = subprocess.run([STT_CLI, "transcribe", path, "--format", "json", "--speaker-detection", "off",
-                          "--engine", "parakeet", "--database", STT_DB],
-                         capture_output=True, text=True, timeout=60).stdout
+    trim_stt_db()
+    t = time.time()
+    try:
+        out = subprocess.run([STT_CLI, "transcribe", path, "--format", "json", "--speaker-detection", "off",
+                              "--engine", "parakeet", "--database", STT_DB],
+                             capture_output=True, text=True, timeout=120).stdout
+    except subprocess.TimeoutExpired:
+        print("stt: timed out after 120 s", flush=True); return ""
+    if time.time() - t > 5: print(f"stt: slow transcription ({time.time() - t:.1f}s)", flush=True)
     try:
         return (json.loads(out).get("rawTranscript") or "").strip()
     except Exception:
@@ -747,6 +764,18 @@ def drain_spool():
 
 drain_spool()
 threading.Thread(target=worker, daemon=True).start()
+def warm_stt():
+    """Load the speech model once at start, so your first command isn't the slow one."""
+    import tempfile, soundfile as sf
+    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
+    sf.write(f.name, np.zeros(16000, dtype=np.float32), 16000)
+    t = time.time(); transcribe(f.name)
+    try: os.unlink(f.name)
+    except OSError: pass
+    print(f"stt: warm ({time.time() - t:.1f}s)", flush=True)
+
+threading.Thread(target=warm_stt, daemon=True).start()
+
 WATCH = {"beat": time.time()}
 
 def watchdog():
