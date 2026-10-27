@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Keyword search over every conversation an orb has ever had (Claude and Codex).
+"""Keyword search over every conversation on this Mac: every Claude Code session (all config folders —
+~/.claude, ~/.claude-mercury, ~/.claude-openrouter, …) and every Codex orb conversation.
   orb_search.py [words…]   -> JSON list, best/newest first:
-     [{kind, id, cwd, title, when, snippet, hits}]
+     [{kind, id, cwd, title, when, snippet, hits, command}]
 Every word must appear (case-insensitive). No words: every session, newest first.
 Text pulled from each transcript is cached by file mtime, so hundreds of sessions stay fast."""
 import glob, json, os, re, sys
@@ -35,12 +36,14 @@ def blocks(c):
 
 
 def claude_text(path):
-    lines, first = [], ""
+    lines, first, title, cwd = [], "", "", ""
     for raw in open(path, errors="ignore"):
         try: e = json.loads(raw)
         except Exception: continue
         t, msg = e.get("type"), e.get("message") or {}
-        if t == "user" and not e.get("isMeta"):
+        cwd = cwd or e.get("cwd") or ""
+        if t == "custom-title": title = e.get("customTitle") or title          # the name it was given
+        elif t == "user" and not e.get("isMeta"):
             for s in blocks(msg.get("content")):
                 s = s.strip()
                 if s and not s.startswith("<"):
@@ -53,7 +56,9 @@ def claude_text(path):
                 elif b.get("type") == "tool_use" and b.get("name", "").endswith("speak"):
                     s = (b.get("input") or {}).get("text", "")
                     if s: lines.append(s)
-    return first, "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > 400_000: text = text[:200_000] + "\n…\n" + text[-200_000:]   # keeps the index small
+    return first, text, title, cwd
 
 
 def spoken(code):
@@ -86,23 +91,33 @@ def codex_text(path):
     return first, "\n".join(lines)
 
 
+def command_for(config_dir):
+    """~/.claude-mercury → claude-mercury (resuming needs the same command that made it)."""
+    base = os.path.basename(config_dir)
+    if base == ".claude": return ""
+    cmd = base.lstrip(".")
+    return cmd if os.path.exists(os.path.expanduser("~/.local/bin/" + cmd)) else ""
+
+
 def sessions():
-    """Every orb session we know of: Claude launches (sessions.json, orbs.json) and the Codex registry."""
+    """Every Claude Code conversation in every config folder, plus the Codex orb conversations."""
     out, seen = [], set()
-    claude = load(os.path.join(V, "sessions.json"), []) + [o for o in load(os.path.join(V, "orbs.json"), []) if o.get("kind") == "claude"]
-    for s in claude:
-        sid = s.get("id")
-        if not sid or sid in seen: continue
-        seen.add(sid)
-        f = claude_file(sid, s.get("cwd"))
-        if f: out.append({"kind": "claude", "id": sid, "cwd": s.get("cwd", ""), "file": f, "name": ""})
+    for cfg in sorted(glob.glob(os.path.expanduser("~/.claude*"))):
+        if not os.path.isdir(os.path.join(cfg, "projects")): continue
+        cmd = command_for(cfg)
+        for f in glob.glob(os.path.join(cfg, "projects", "*", "*.jsonl")):     # top level only: not subagents
+            sid = os.path.basename(f)[:-6]
+            if sid in seen: continue
+            seen.add(sid)
+            out.append({"kind": "claude", "id": sid, "cwd": "", "file": f, "name": "", "command": cmd})
     reg = load(os.path.join(CODEX_ROOT, "runtime", "sessions.json"), {}).get("sessions", [])
     for s in reg + [o for o in load(os.path.join(V, "orbs.json"), []) if o.get("kind") == "codex"]:
         sid = s.get("id")
         if not sid or sid in seen: continue
         seen.add(sid)
         f = codex_file(sid)
-        if f: out.append({"kind": "codex", "id": sid, "cwd": s.get("cwd", ""), "file": f, "name": s.get("name") or s.get("label") or ""})
+        if f: out.append({"kind": "codex", "id": sid, "cwd": s.get("cwd", ""), "file": f,
+                          "name": s.get("name") or s.get("label") or "", "command": ""})
     return out
 
 
@@ -127,17 +142,21 @@ def main():
         f = s["file"]
         m = os.path.getmtime(f)
         c = cache.get(f)
-        if not c or c.get("m") != m:
-            first, text = (claude_text if s["kind"] == "claude" else codex_text)(f)
-            c = {"m": m, "first": first, "text": text}
+        if not c or c.get("m") != m or "cwd" not in c:
+            if s["kind"] == "claude": first, text, ctitle, cwd = claude_text(f)
+            else: (first, text), ctitle, cwd = codex_text(f), "", s["cwd"]
+            c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd}
         fresh[f] = c
         if not c["text"].strip(): continue                    # never actually talked to it
         low = c["text"].lower()
         if names.get(s["id"]): low = names[s["id"]].lower() + "\n" + low      # its name is searchable too
         if words and not all(w in low for w in words): continue
-        title = names.get(s["id"]) or c["first"][:80] or s["name"] or os.path.basename(s["cwd"].rstrip("/"))
-        results.append({"kind": s["kind"], "id": s["id"], "cwd": s["cwd"], "title": title, "name": s["name"], "when": m,
-                        "snippet": snippet(c["text"], words), "hits": sum(low.count(w) for w in words)})
+        cwd = c.get("cwd") or s["cwd"]
+        if c.get("title"): low = c["title"].lower() + "\n" + low
+        title = names.get(s["id"]) or c.get("title") or c["first"][:80] or s["name"] or os.path.basename(cwd.rstrip("/"))
+        results.append({"kind": s["kind"], "id": s["id"], "cwd": cwd, "title": title, "name": s["name"], "when": m,
+                        "snippet": snippet(c["text"], words), "hits": sum(low.count(w) for w in words),
+                        "command": s["command"]})
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     try:
         json.dump(fresh, open(CACHE + ".tmp", "w")); os.replace(CACHE + ".tmp", CACHE)

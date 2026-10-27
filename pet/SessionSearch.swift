@@ -1,4 +1,5 @@
-// "+" → Search sessions: keyword search over every conversation any orb has had (Claude and Codex).
+// "+" → Search sessions: keyword search over every Claude Code conversation on this Mac and every Codex orb's.
+// Empty search: the most recent first.
 // Click a result (or Return for the highlighted one) and a new orb opens, resuming that conversation.
 import AppKit
 import Combine
@@ -7,6 +8,7 @@ import SwiftUI
 struct SearchHit: Decodable, Identifiable, Equatable {
     let kind: String, id: String, cwd: String, title: String, when: Double, snippet: String
     let name: String?
+    let command: String?                        // e.g. claude-openrouter: its conversations only resume with it
 }
 
 final class SessionSearchModel: ObservableObject {

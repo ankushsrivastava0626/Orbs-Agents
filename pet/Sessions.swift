@@ -518,7 +518,8 @@ final class SessionsController: NSObject {
         search.close()
         if let e = entries.first(where: { $0.id == h.id }) { select(e.name); return }
         if h.kind == "claude" {
-            startClaude(newClaudeName(), ["--resume", h.id, "--cwd", h.cwd])
+            let cmd = (h.command ?? "").isEmpty ? [] : ["--cmd", h.command!]   // its own command (e.g. OpenRouter)
+            startClaude(newClaudeName(), ["--resume", h.id, "--cwd", h.cwd] + cmd)
         } else {
             let name = entries.contains(where: { $0.name == "codex" }) ? nextName("codex") : "codex"
             entries.append(OrbEntry(name: name, kind: "codex", id: h.id, cwd: h.cwd, label: h.name ?? h.title))

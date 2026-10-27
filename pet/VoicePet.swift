@@ -1053,8 +1053,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path); p.arguments = args
         let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        try? p.run(); p.waitUntilExit()
-        return String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        try? p.run()
+        // read before waiting: a reply bigger than the pipe's 64 KB would otherwise block the script forever
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     var voiceDir: String { NSHomeDirectory() + "/.claude/voice" }
