@@ -14,7 +14,8 @@ final class TaskBoardModel: ObservableObject {
     @Published var v = TaskView()
     @Published var shown = false
     @Published var flipped = false              // showing Mercury's version
-    @Published var prompt = ""
+    static let defaultPrompt = "organize this into what to do"
+    @Published var prompt = TaskBoardModel.defaultPrompt   // ready to send, never sent on its own
     @Published var sent = false                 // a prompt is out: flip when its answer lands
     @Published var editing = ""                 // "original" / "ai" while you edit that side
     @Published var draft = ""
@@ -312,6 +313,7 @@ final class TaskBoard: NSObject, NSWindowDelegate {
         }
         m.onClear = { [weak self] in
             self?.m.flipped = false
+            self?.m.prompt = TaskBoardModel.defaultPrompt          // fresh start: the default is ready again
             self?.post("/task/clear")
         }
         show()
