@@ -316,15 +316,18 @@ final class TaskBoard: NSObject {
         peeking = true; peekActive = Date()
         let p = NSEvent.mouseLocation
         let s = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        // columns of one width; each card as tall as its whole text, placed in the shortest column
         let gap: CGFloat = 12, margin: CGFloat = 16
-        let w = s.width - 2 * margin, h = s.height - 2 * margin, n = CGFloat(ids.count)
-        let cols = max(1, min(n, (n * w / h).squareRoot().rounded(.up)))
-        let rows = (n / cols).rounded(.up)
-        let cw = min(420, (w - gap * (cols - 1)) / cols), ch = min(480, (h - gap * (rows - 1)) / rows)
-        for (i, id) in ids.enumerated() {
-            let c = CGFloat(i % Int(cols)), r = CGFloat(i / Int(cols))
-            boards[id]?.peek(to: NSRect(x: s.minX + margin + c * (cw + gap),
-                                        y: s.maxY - margin - (r + 1) * ch - r * gap, width: cw, height: ch))
+        let w = s.width - 2 * margin, maxH = s.height - 2 * margin
+        let cols = max(1, min(ids.count, Int((w + gap) / (340 + gap))))
+        let cw = min(460, (w - gap * CGFloat(cols - 1)) / CGFloat(cols))
+        var tops = [CGFloat](repeating: s.maxY - margin, count: cols)
+        for id in ids {
+            guard let b = boards[id] else { continue }
+            let h = min(maxH, max(160, b.fittingHeight(width: cw)))
+            let c = tops.indices.min { tops[$0] > tops[$1] } ?? 0     // the column with the most room left
+            b.peek(to: NSRect(x: s.minX + margin + CGFloat(c) * (cw + gap), y: tops[c] - h, width: cw, height: h))
+            tops[c] -= h + gap
         }
         peekTimer?.invalidate()
         peekTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -492,6 +495,33 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
     }
 
     var frame: NSRect? { panel?.frame }
+
+    /// How tall the card has to be at this width to show everything on the side it's showing.
+    func fittingHeight(width: CGFloat) -> CGFloat {
+        let base = NSFont.systemFont(ofSize: 13, weight: .medium)
+        let font = base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 13) } ?? base
+        let para = NSMutableParagraphStyle(); para.lineSpacing = 2
+        func height(_ t: String, _ w: CGFloat) -> CGFloat {
+            guard !t.isEmpty else { return 0 }
+            return ceil((t as NSString).boundingRect(with: NSSize(width: max(40, w), height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font, .paragraphStyle: para]).height)
+        }
+        let inner = width - 28                                      // the text's side padding
+        if m.flipped {                                              // Mercury's lines: bullets, indents, headings
+            var h: CGFloat = 0
+            for raw in m.v.ai.components(separatedBy: "\n") {
+                let lead = raw.prefix { $0 == " " || $0 == "\t" }.count
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                if line.isEmpty { h += 8; continue }
+                let heading = line.hasPrefix("#") || (line.hasSuffix(":") && line.count < 40)
+                h += height(line, inner - CGFloat(min(4, lead / 2)) * 16 - (heading ? 0 : 12)) + 4 + (heading ? 8 : 0)
+            }
+            return 34 + h + 14 + 12                                 // header, lines, bottom padding, slack
+        }
+        let said = [m.v.original, m.v.live].filter { !$0.isEmpty }
+        let text = said.isEmpty ? 40 : said.map { height($0, inner) }.reduce(0, +) + CGFloat(said.count - 1) * 8
+        return 34 + text + 10 + 48 + 12                             // header, words, padding, record bar, slack
+    }
     private var peeked = false                   // laid out by the quick look: don't remember that spot
 
     func peek(to r: NSRect) {
