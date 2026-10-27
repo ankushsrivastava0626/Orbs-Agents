@@ -854,6 +854,10 @@ def meeting_stop():
             p = MEETING.get("proc")
             if p: p.poll()
             time.sleep(0.1)
+        if _alive(pid):                                   # stuck in the audio system: it would keep the mic open forever
+            print("meeting: recorder didn't stop; forcing it", flush=True)
+            try: os.kill(pid, signal.SIGKILL)
+            except OSError: pass
         try: os.unlink(ACTIVE)
         except OSError: pass
         wav = os.path.join(folder, "audio.wav")
