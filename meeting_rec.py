@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Record the mic to a WAV until told to stop (SIGTERM/SIGINT). Its own process, so a restart of the
 voice server never cuts a meeting off. usage: meeting_rec.py <out.wav> [device-name-part]"""
-import signal, sys, threading
+import signal, sys, threading, time
 import sounddevice as sd, soundfile as sf
 
 out, want = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "MacBook").lower()
@@ -20,4 +20,9 @@ with sf.SoundFile(out, "w", samplerate=16000, channels=1, subtype="PCM_16") as f
             n += 1
             if n % 5 == 0:
                 with lock: f.flush()                       # every 5 s: a crash loses little, and the live board can read it
+        # Stopping: everything is on disk first, then closing the mic. If macOS's audio system hangs on that
+        # close (it can, after a device change), leave anyway: nothing is lost, the server fixes the header.
+        with lock: f.flush()
+        import os
+        threading.Thread(target=lambda: (time.sleep(3), os._exit(0)), daemon=True).start()
 print("saved", out, flush=True)

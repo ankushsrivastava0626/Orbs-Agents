@@ -949,6 +949,15 @@ def meeting_recover():
     elif a:
         try: os.unlink(ACTIVE)
         except OSError: pass
+    # any other recorder left from an earlier meeting would keep the mic open: end it
+    import subprocess
+    keep = MEETING.get("pid") if MEETING["on"] else None
+    for line in subprocess.run(["pgrep", "-f", REC], capture_output=True, text=True).stdout.split():
+        pid = int(line)
+        if pid != keep and pid != os.getpid():
+            print("meeting: ending a leftover recorder", pid, flush=True)
+            try: os.kill(pid, signal.SIGKILL)
+            except OSError: pass
     stt_warm.wait(180)                                # your first voice command isn't stuck behind a meeting
     for d in sorted(os.listdir(MEETINGS)) if os.path.isdir(MEETINGS) else []:
         f = os.path.join(MEETINGS, d)
