@@ -348,6 +348,12 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps({"muted": STATUS["muted_sessions"]}).encode()); return
+        if self.path in ("/meeting/prompt", "/meeting/ask"):   # meeting board: the prompt for each line / one question
+            try: v = (json.loads(body or "{}").get("text") or "").strip()
+            except Exception: v = ""
+            if self.path == "/meeting/prompt":
+                LIVE["prompt"] = v; self._ok(); return
+            self._ok(json.dumps({"answer": meeting_ask(v) if v else ""}).encode()); return
         if self.path == "/meeting":          # pet: right Option double-tap → toggle meeting recording
             (meeting_stop if MEETING["on"] else meeting_start)()
             self._ok(json.dumps({"meeting": MEETING["on"], "folder": MEETING["folder"]}).encode()); return
@@ -828,7 +834,7 @@ def meeting_start():
                             stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
                             start_new_session=True)            # its own process group: our restarts don't kill it
     MEETING.update(on=True, started=time.time(), folder=folder, pid=proc.pid, proc=proc)
-    LIVE.update(folder=folder, segs=[], offset=WAV_HEADER, final=False)
+    LIVE.update(folder=folder, segs=[], offset=WAV_HEADER, final=False, ai=[], ask={"q": "", "a": "", "busy": False})
     json.dump({"pid": proc.pid, "folder": folder, "started": MEETING["started"]}, open(ACTIVE, "w"))
     STATUS.update(meeting=True, meeting_started=MEETING["started"], meeting_folder=folder)
     print("meeting: recording to", folder, "pid", proc.pid, flush=True)
@@ -992,6 +998,9 @@ def meeting_transcribe(folder, wav):
         if LIVE["folder"] == folder:                    # the board switches to the final transcript
             LIVE.update(segs=[{"start": g.get("startMs", 0), "end": g.get("endMs", 0), "speaker": g.get("speakerLabel") or "Speaker",
                                "text": g.get("text", "").strip()} for g in segs], final=True)
+        if LIVE["folder"] == folder and LIVE["ai"]:          # keep what the prompt said, next to the transcript
+            open(os.path.join(folder, "prompt-replies.txt"), "w").write("\n\n".join(
+                f"[{_ts(x['at'])}] {x['speaker']}: {x['said']}\n  → {x['reply']}" for x in LIVE["ai"]) + "\n")
         try: os.remove(os.path.join(folder, "live.json"))
         except OSError: pass
         STATUS.update(meeting_done=folder, meeting_done_at=time.time())
@@ -1002,22 +1011,23 @@ def meeting_transcribe(folder, wav):
 
 # ---- meeting board: live transcription while recording (only while the board is on) ----
 WAV_HEADER = 44                                  # meeting_rec.py: 16 kHz mono 16-bit, samples after 44 bytes
-LIVE = {"seen": 0, "folder": "", "segs": [], "offset": WAV_HEADER, "final": False}
+LIVE = {"seen": 0, "folder": "", "segs": [], "offset": WAV_HEADER, "final": False,
+        "prompt": "", "ai": [], "ask": {"q": "", "a": "", "busy": False}}
 LIVE_DB = os.path.join(DIR, "meetings-live.db")
 LIVE_EVERY = 15                                  # seconds of new audio per pass
 
 def live_load(folder):
-    LIVE.update(folder=folder, segs=[], offset=WAV_HEADER, final=False)
+    LIVE.update(folder=folder, segs=[], offset=WAV_HEADER, final=False, ai=[], ask={"q": "", "a": "", "busy": False})
     try:
         d = json.load(open(os.path.join(folder, "live.json")))
-        LIVE.update(segs=d.get("segs", []), offset=d.get("offset", WAV_HEADER))
+        LIVE.update(segs=d.get("segs", []), offset=d.get("offset", WAV_HEADER), ai=d.get("ai", []))
     except Exception:
         pass
 
 def meeting_live_view():
     return {"recording": MEETING["on"], "started": MEETING.get("started", 0),
             "transcribing": STATUS.get("meeting_transcribing", False), "final": LIVE["final"],
-            "folder": LIVE["folder"], "segments": LIVE["segs"]}
+            "folder": LIVE["folder"], "segments": LIVE["segs"], "prompt": LIVE["prompt"], "ai": LIVE["ai"], "ask": LIVE["ask"]}
 
 def live_pass(folder):
     """Transcribe the audio recorded since the last pass, cut at the quietest moment of its last 3 s
@@ -1059,14 +1069,102 @@ def live_pass(folder):
     segs = d.get("transcriptSegments") or []
     if not segs and (d.get("rawTranscript") or "").strip():
         segs = [{"startMs": 0, "endMs": len(x) // 16, "text": d["rawTranscript"]}]
+    new = []
     for g in segs:
         t = (g.get("text") or "").strip()
         if t:
-            LIVE["segs"].append({"start": t0 + g.get("startMs", 0), "end": t0 + g.get("endMs", 0),
-                                 "speaker": g.get("speakerLabel") or "Speaker", "text": t})
+            new.append({"start": t0 + g.get("startMs", 0), "end": t0 + g.get("endMs", 0),
+                        "speaker": g.get("speakerLabel") or "Speaker", "text": t})
+    LIVE["segs"] += new
     LIVE["offset"] += cut * 2
-    try: json.dump({"segs": LIVE["segs"], "offset": LIVE["offset"]}, open(os.path.join(folder, "live.json"), "w"))
+    live_save(folder)
+    apply_prompt(new)
+
+def live_save(folder):
+    try: json.dump({"segs": LIVE["segs"], "offset": LIVE["offset"], "ai": LIVE["ai"]}, open(os.path.join(folder, "live.json"), "w"))
     except OSError: pass
+
+def _ts(ms):
+    s = int(ms // 1000); h = s // 3600
+    return f"{h}:{s // 60 % 60:02d}:{s % 60:02d}" if h else f"{s // 60:02d}:{s % 60:02d}"
+
+def transcript_lines(segs, upto=None):
+    """[mm:ss] Speaker N: text — one line per turn, so the model knows who said what and when."""
+    out, last = [], None
+    for g in segs:
+        if upto is not None and g["start"] > upto: break
+        if last and last[0] == g["speaker"]: last[1].append(g["text"]); continue
+        last = (g["speaker"], [g["text"]], g["start"]); out.append(last)
+    return [f"[{_ts(st)}] {who}: {' '.join(t)}" for who, t, st in out]
+
+OPENROUTER_MODEL = "inception/mercury-3"
+
+def openrouter(messages, max_tokens=900):
+    """One reply from Mercury on OpenRouter. The key is read from your .env (never stored here)."""
+    import urllib.request
+    env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/Githubs/.env"))
+    key = next((l.split("=", 1)[1].strip().strip('"\'') for l in open(env) if l.startswith("OPENROUTER_API_KEY=")), "")
+    if not key: raise RuntimeError("no OPENROUTER_API_KEY in " + env)
+    req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", method="POST",
+        data=json.dumps({"model": config().get("MEETING_MODEL", OPENROUTER_MODEL), "messages": messages,
+                         "max_tokens": max_tokens}).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Title": "VoicePet meeting board"})
+    d = json.loads(urllib.request.urlopen(req, timeout=90).read())
+    if d.get("error"): raise RuntimeError(str(d["error"])[:200])
+    return (d["choices"][0]["message"].get("content") or "").strip()
+
+ai_pool = None
+
+def apply_prompt(new):
+    """Run the board's prompt on each new turn (consecutive lines from one speaker), with the speaker and
+    time, plus the last few turns for context. Replies land on the board under what they answer."""
+    global ai_pool
+    prompt, folder = LIVE["prompt"].strip(), LIVE["folder"]
+    if not prompt or not new: return
+    if ai_pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        ai_pool = ThreadPoolExecutor(3)
+    turns = []
+    for g in new:
+        if turns and turns[-1]["speaker"] == g["speaker"]: turns[-1]["text"] += " " + g["text"]
+        else: turns.append(dict(g))
+    for t in turns:
+        if len(t["text"].split()) < 3: continue                 # "Yeah." / "Okay." aren't worth a reply
+        context = transcript_lines(LIVE["segs"], upto=t["start"])[-8:-1]
+        def run(t=t, context=context):
+            try:
+                reply = openrouter([
+                    {"role": "system", "content": "You help during a live meeting. The user's instruction is applied to one "
+                        "thing a single speaker just said. Speakers are labelled Speaker 1, Speaker 2, ... (from automatic "
+                        "speaker detection) with [mm:ss] times. Answer the instruction for that line only, briefly "
+                        "(1-3 sentences), plain text, no preamble. If the instruction doesn't apply to it, reply with just: -"
+                        "\n\nInstruction: " + prompt},
+                    {"role": "user", "content": ("Earlier:\n" + "\n".join(context) + "\n\n" if context else "")
+                        + f"Just said:\n[{_ts(t['start'])}] {t['speaker']}: {t['text']}"}])
+            except Exception as e:
+                print("meeting board: prompt failed:", repr(e)[:200], flush=True); return
+            if reply and reply != "-" and LIVE["folder"] == folder:
+                LIVE["ai"].append({"at": t["start"], "speaker": t["speaker"], "said": t["text"], "reply": reply, "prompt": prompt})
+                LIVE["ai"].sort(key=lambda a: a["at"])
+                live_save(folder)
+        ai_pool.submit(run)
+
+def meeting_ask(q):
+    """One question about the meeting so far (the whole transcript, with speakers and times); one answer."""
+    lines = transcript_lines(LIVE["segs"])
+    LIVE["ask"] = {"q": q, "a": "", "busy": True}
+    try:
+        a = openrouter([
+            {"role": "system", "content": "You answer questions about a meeting from its transcript. Each line is "
+                "[mm:ss] Speaker N: what they said (speaker numbers come from automatic speaker detection; the user may be "
+                "one of them). Refer to people by their speaker number and time when it helps. Be concise and plain text. "
+                "If the transcript doesn't say, say so."},
+            {"role": "user", "content": "Transcript so far:\n" + ("\n".join(lines) or "(nothing transcribed yet)")
+                + "\n\nQuestion: " + q}], max_tokens=1500)
+    except Exception as e:
+        a = "Couldn't get an answer: " + str(e)[:150]
+    LIVE["ask"] = {"q": q, "a": a, "busy": False}
+    return a
 
 def meeting_live():
     stt_warm.wait(180)
