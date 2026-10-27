@@ -27,6 +27,7 @@ struct OrbEntry: Codable, Equatable {
     var label: String? = nil
     var hotkey: Hotkey? = nil // speak hotkey you set; nil = the default for its position
     var closed: Bool? = nil   // you closed it: don't relaunch it automatically
+    var command: String? = nil // custom launch command ("claude-openrouter --model …"); kept when we rewrite the file
 }
 
 /// A hold-to-talk key. Modifiers are side-specific (left ⌥ ≠ right ⌥). code -1 = no hotkey.
@@ -87,7 +88,10 @@ struct SessionOrb: View {
                 : working ? .working : .idle
             OrbFace(mode: mode, level: target ? s.level : 0, outLevel: speaking ? s.out_level : 0,
                     auto: target && s.auto, notes: target && s.notes, ripple: target && main.flying != nil,
-                    problem: target && main.problem, selected: target, muted: s.muted_sessions.contains(entry.name))
+                    problem: target && main.problem,
+                idleColor: (entry.command ?? "").contains("openrouter") ? Color(red: 1.0, green: 0.55, blue: 0.75)   // OpenRouter: rose
+                                                                         : Color(red: 0.55, green: 0.6, blue: 0.75),
+                selected: target, muted: s.muted_sessions.contains(entry.name))
                 .scaleEffect(0.62)
         }
     }
