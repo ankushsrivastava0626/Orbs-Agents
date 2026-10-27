@@ -27,6 +27,7 @@ final class TaskBoardModel: ObservableObject {
     @Published var sent = false                 // a prompt is out: flip when its answer lands
     @Published var editing = ""                 // "original" / "ai" while you edit that side
     @Published var draft = ""
+    @Published var barShown = false             // the top bar: shown when you click the card, gone when you click elsewhere
     var onSaveEdit: () -> Void = {}
     func edit(_ side: String) {
         if editing == side { onSaveEdit(); return }                // the checkmark: save
@@ -42,7 +43,6 @@ final class TaskBoardModel: ObservableObject {
 struct TaskBoardView: View {
     @ObservedObject var m: TaskBoardModel
     var measuring = false                        // laid out off-screen, unscrolled, to find the size that fits it all
-    @State private var hover = false
     @State private var now = Date()
     let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -68,7 +68,7 @@ struct TaskBoardView: View {
         .opacity(m.shown ? 1 : 0)
         .animation(m.shown ? OSMotion.show : .easeInOut(duration: 0.35), value: m.shown)
         .onReceive(tick) { now = $0 }
-        .onHover { h in hover = h }
+
     }
 
     @ViewBuilder private func scroll<C: View>(@ViewBuilder _ c: () -> C) -> some View {
@@ -99,7 +99,7 @@ struct TaskBoardView: View {
 
     private var front: some View {
         card(frontHeader) {
-            Color.clear.frame(height: 12)                    // the header only shows on hover (over the top)
+            Color.clear.frame(height: 12)                    // the header only shows once you click the card
 
             scroll {
                 VStack(alignment: .leading, spacing: 8) {
@@ -151,7 +151,7 @@ struct TaskBoardView: View {
         }
     }
 
-    // the card's header: hidden until you hover the card, then it slides in over the top
+    // the card's header: hidden until you click the card, then it slides in over the top
     private var frontHeader: some View {
         HStack(spacing: 7) {
             Circle().fill(m.v.recording && m.v.ready ? Color.red : Color.white.opacity(0.25)).frame(width: 6, height: 6)
@@ -192,9 +192,10 @@ struct TaskBoardView: View {
                                              .init(color: Color(white: 0.07), location: 0.78),   // then a short fade
                                              .init(color: Color(white: 0.07).opacity(0), location: 1)],
                                     startPoint: .top, endPoint: .bottom).padding(.bottom, -10))
-            .opacity(hover || !m.editing.isEmpty ? 1 : 0)
-            .offset(y: hover || !m.editing.isEmpty ? 0 : -6)
-            .animation(OSMotion.show, value: hover)
+            .opacity(m.barShown || !m.editing.isEmpty ? 1 : 0)
+            .offset(y: m.barShown || !m.editing.isEmpty ? 0 : -6)
+            .allowsHitTesting(m.barShown || !m.editing.isEmpty)
+            .animation(OSMotion.show, value: m.barShown)
     }
 
     private var canAsk: Bool {
@@ -307,11 +308,19 @@ final class TaskBoard: NSObject {
     private var peeking = false
     private var peekActive = Date()              // last time the pointer was on a card (or the corner)
     private var peekTimer: Timer?
+    private var cornerTimer: Timer?
     private var monitors: [Any] = []
     private static let peekLinger: TimeInterval = 6
 
     private func startCornerWatch() {
         guard monitors.isEmpty else { return }
+        watchCardClicks()
+        // Mouse-move monitors only hear other apps, so once you've clicked a card (the pet is in front) they go
+        // quiet: a cheap position check every 0.1 s catches the corner either way.
+        let t = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in self?.mouseMoved() }
+        t.tolerance = 0.05
+        RunLoop.main.add(t, forMode: .common)
+        cornerTimer = t
         for mask in [NSEvent.EventTypeMask.mouseMoved, .leftMouseDragged] {
             if let m = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in self?.mouseMoved() }) {
                 monitors.append(m)
@@ -319,8 +328,29 @@ final class TaskBoard: NSObject {
         }
         // a click anywhere else ends it (our own clicks on a card never reach a global monitor)
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
-            guard let self, self.peeking, !self.pointerOnCard() else { return }
-            self.endPeek()
+            guard let self, !self.pointerOnCard() else { return }
+            for b in self.boards.values { b.m.barShown = false }      // a click outside every card: bars away
+            if self.peeking { self.endPeek() }
+        }) { monitors.append(m) }
+    }
+
+    /// A click (not a drag) on a card, below its top strip, brings up that card's bar; the others' go away.
+    /// The window's own drag handling swallows the mouse-up, so: note the press, wait for the button to come up,
+    /// and if the card didn't move it was a click.
+    private func watchCardClicks() {
+        if let m = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown, handler: { [weak self] e in
+            guard let self, let w = e.window, let hit = self.boards.values.first(where: { $0.isWindow(w) }) else { return e }
+            guard w.frame.height - e.locationInWindow.y > 34 else { return e }   // the top strip is for dragging
+            let start = w.frame.origin, pressed = Date()
+            func check() {
+                if NSEvent.pressedMouseButtons & 1 != 0 && Date().timeIntervalSince(pressed) < 5 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { check() }; return
+                }
+                guard hypot(w.frame.origin.x - start.x, w.frame.origin.y - start.y) < 3 else { return }   // dragged
+                for b in self.boards.values { b.m.barShown = b === hit }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { check() }
+            return e
         }) { monitors.append(m) }
     }
 
@@ -539,6 +569,7 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
     }
 
     var frame: NSRect? { panel?.frame }
+    func isWindow(_ w: NSWindow) -> Bool { panel === w }
 
     /// Where you dragged this card in the quick look (its top-left corner), if you did.
     var peekSpot: NSPoint? {

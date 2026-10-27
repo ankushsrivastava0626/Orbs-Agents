@@ -1230,6 +1230,7 @@ def task_load():
         task_save()
     saved = os.path.join(TASKS, "saved")             # cards set aside by the old single board's +: back as boards
     for f in sorted(os.listdir(saved)) if os.path.isdir(saved) else []:
+        if not f.endswith(".json"): continue          # already brought back once
         try:
             c = json.load(open(os.path.join(saved, f)))
             CARDS.insert(0, card_new(c.get("original", ""), c.get("ai", ""), c.get("prompt", ""), save=False))
