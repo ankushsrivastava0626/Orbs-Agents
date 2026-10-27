@@ -13,6 +13,8 @@ with sf.SoundFile(out, "w", samplerate=16000, channels=1, subtype="PCM_16") as f
     def cb(d, frames, t, st):
         with lock: f.write(d.copy())
     with sd.InputStream(device=dev, samplerate=16000, channels=1, dtype="float32", callback=cb):
+        import json, os, time                              # when the mic really started: Mac audio is lined up to it
+        json.dump({"started": time.time()}, open(os.path.join(os.path.dirname(out), "mic.json"), "w"))
         n = 0
         while not stop.wait(1):
             n += 1

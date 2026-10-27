@@ -34,7 +34,7 @@ struct Status: Codable {
     var captions: [Caption] = []
     var last_said: [String: Caption] = [:]                // each orb's last reply, spoken or muted
     var muted = false, muted_text = "", muted_at = 0.0    // Codex: its own mute + last muted reply
-    var meeting = false, meeting_started = 0.0, meeting_transcribing = false, meeting_done = "", meeting_done_at = 0.0
+    var meeting = false, meeting_started = 0.0, meeting_transcribing = false, meeting_done = "", meeting_done_at = 0.0, meeting_folder = ""
 
     init() {}
 
@@ -67,6 +67,7 @@ struct Status: Codable {
         meeting = g("meeting", false); meeting_started = g("meeting_started", 0.0)
         meeting_transcribing = g("meeting_transcribing", false)
         meeting_done = g("meeting_done", ""); meeting_done_at = g("meeting_done_at", 0.0)
+        meeting_folder = g("meeting_folder", "")
         if let p: CodexPending = g("pending", nil) { approvalId = p.request_id; approvalDetail = p.detail; approvalMethod = p.method }
     }
 }
@@ -712,6 +713,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         for s in bubbles.keys where !(bubbles[s]?.0.cards.isEmpty ?? true) { placeBubble(s) }   // follow the dock
+        if model.online { systemAudio.sync(meeting: model.s.meeting, folder: model.s.meeting_folder) }   // Mac audio into the meeting
         model.cornerSession = sessions.firstName ?? ""
         let h = model.hovering && !osMode.on
         if h != cornerHover {
@@ -830,6 +832,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var rCmdLastTapAt: Date?
     lazy var meetingBadge = MeetingBadge(model)
     let meetingBoard = MeetingBoard()
+    let systemAudio = SystemAudio()
+    @objc func menuMacAudio() { systemAudio.toggle() }
     @objc func menuMeetingBoard() { meetingBoard.toggle() }
 
     func toggleMeeting() {
@@ -1139,6 +1143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item("Focus timer", #selector(menuPomodoro), on: !pomodoro.hidden)
         item(model.s.meeting ? "Stop recording meeting (right Option ×2)" : "Record meeting (right Option ×2)", #selector(menuMeeting))
         item("Meeting board (live transcript)", #selector(menuMeetingBoard), on: meetingBoard.enabled)
+        item("Record Mac audio in meetings", #selector(menuMacAudio), on: systemAudio.enabled)
         item("Open meetings folder", #selector(menuOpenMeetings))
         item("Tunnel vision (Esc to exit)", #selector(menuTunnel), on: !tunnelPanels.isEmpty)
         let shape = NSMenuItem(title: "Tunnel shape", action: nil, keyEquivalent: "")

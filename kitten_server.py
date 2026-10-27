@@ -809,6 +809,7 @@ threading.Thread(target=warm_stt, daemon=True).start()
 # ---- meetings: right Option double-tap starts/stops; mic only; transcribed with speaker labels ----
 MEETINGS = os.path.join(DIR, "meetings")
 MEETING = {"on": False, "started": 0, "folder": "", "stop": None}
+FINISHING = set()                                # meetings being saved and transcribed right now
 
 ACTIVE = os.path.join(MEETINGS, "active.json")   # the recording in progress (survives a server restart)
 REC = os.path.join(DIR, "meeting_rec.py")
@@ -838,6 +839,7 @@ def meeting_stop():
     MEETING["on"] = False
     pid, folder = MEETING["pid"], MEETING["folder"]
     STATUS.update(meeting=False, meeting_transcribing=True)
+    FINISHING.add(folder)                                # the leftover sweep leaves it to us
     def finish():
         try: os.kill(pid, signal.SIGTERM)
         except OSError: pass
@@ -850,13 +852,79 @@ def meeting_stop():
         except OSError: pass
         wav = os.path.join(folder, "audio.wav")
         subprocess_repair(wav)
+        wait_system_audio(folder)
+        mix_system(folder)
         print("meeting: saved", wav, flush=True)
-        meeting_transcribe(folder, wav)
+        try: meeting_transcribe(folder, wav)
+        finally: FINISHING.discard(folder)
     threading.Thread(target=finish, daemon=True).start()
 
 def subprocess_repair(wav):
     import subprocess
     subprocess.run([sys.executable, os.path.join(DIR, "wav_repair.py"), wav], capture_output=True)
+
+# ---- Mac audio: the pet records what the Mac plays into system.wav (same format) next to the mic's audio.wav ----
+def _started(folder, name):
+    try: return json.load(open(os.path.join(folder, name)))["started"]
+    except Exception: return None
+
+def system_offset(folder):
+    """Mic sample index of the Mac audio's first sample."""
+    s = _started(folder, "system.json")
+    m = _started(folder, "mic.json") or MEETING.get("started") or s
+    return int(round((s - m) * 16000)) if s else 0
+
+def wait_system_audio(folder, timeout=6):
+    """The pet sees the meeting end a moment after us: give it time to close system.wav."""
+    if not os.path.exists(os.path.join(folder, "system.json")): return
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            if json.load(open(os.path.join(folder, "system.json"))).get("ended"): return
+        except Exception: pass
+        time.sleep(0.2)
+
+def mix_system(folder):
+    """Add the Mac audio into audio.wav in place (no extra disk), lined up by start time; then drop it."""
+    import numpy as np
+    wav, sw = os.path.join(folder, "audio.wav"), os.path.join(folder, "system.wav")
+    if not (os.path.isfile(wav) and os.path.isfile(sw)): return
+    try:
+        off = system_offset(folder)
+        n_mic, n_sys = (os.path.getsize(wav) - WAV_HEADER) // 2, (os.path.getsize(sw) - WAV_HEADER) // 2
+        if n_mic > 0 and n_sys > 0:
+            mic = np.memmap(wav, dtype="<i2", mode="r+", offset=WAV_HEADER, shape=(n_mic,))
+            sysd = np.memmap(sw, dtype="<i2", mode="r", offset=WAV_HEADER, shape=(n_sys,))
+            step = 16000 * 60
+            for j0 in range(max(0, -off), n_sys, step):              # Mac sample j lands on mic sample j + off
+                j1 = min(j0 + step, n_sys, n_mic - off)
+                if j1 <= j0: break
+                a = mic[j0 + off:j1 + off].astype(np.int32) + sysd[j0:j1]
+                mic[j0 + off:j1 + off] = np.clip(a, -32768, 32767)
+            mic.flush(); del mic, sysd
+        print(f"meeting: mixed in Mac audio ({n_sys / 16000:.0f}s)", flush=True)
+    except Exception as e:
+        print("meeting: Mac audio mix failed:", repr(e), flush=True); return
+    for junk in ("system.wav", "system.json", "mic.json"):
+        try: os.remove(os.path.join(folder, junk))
+        except OSError: pass
+
+def system_slice(folder, m0, n):
+    """Mac audio for mic samples [m0, m0+n), zeros where there's none (yet)."""
+    import numpy as np
+    out = np.zeros(n, dtype=np.int32)
+    sw = os.path.join(folder, "system.wav")
+    if not os.path.isfile(sw): return out
+    j0 = m0 - system_offset(folder)
+    a, b = max(j0, 0), j0 + n
+    try:
+        with open(sw, "rb") as f:
+            f.seek(WAV_HEADER + 2 * a); raw = f.read(2 * max(0, b - a))
+    except OSError:
+        return out
+    x = np.frombuffer(raw[:len(raw) - len(raw) % 2], dtype="<i2")
+    out[a - j0:a - j0 + len(x)] = x
+    return out
 
 def meeting_recover():
     """After a restart: pick a recording that's still going back up, or finish one whose recorder died;
@@ -875,9 +943,10 @@ def meeting_recover():
     for d in sorted(os.listdir(MEETINGS)) if os.path.isdir(MEETINGS) else []:
         f = os.path.join(MEETINGS, d)
         wav = os.path.join(f, "audio.wav")
-        if MEETING["on"] and f == MEETING["folder"]: continue
+        if (MEETING["on"] and f == MEETING["folder"]) or f in FINISHING: continue
         if os.path.isfile(wav) and not os.path.exists(os.path.join(f, "transcript.txt")) and os.path.getsize(wav) > 32000:
             subprocess_repair(wav)
+            mix_system(f)
             print("meeting: transcribing leftover", f, flush=True)
             meeting_transcribe(f, wav)
 
@@ -961,7 +1030,8 @@ def live_pass(folder):
     if end - LIVE["offset"] < 8 * 32000: return              # wait for at least 8 s of new audio
     with open(wav, "rb") as f:
         f.seek(LIVE["offset"]); raw = f.read(end - LIVE["offset"])
-    x = np.frombuffer(raw, dtype="<i2")
+    x = np.frombuffer(raw, dtype="<i2").astype(np.int32)
+    x = np.clip(x + system_slice(folder, (LIVE["offset"] - WAV_HEADER) // 2, len(x)), -32768, 32767).astype(np.int16)
     final_chunk = not MEETING["on"]
     cut = len(x)
     if not final_chunk and len(x) > 4 * 16000:

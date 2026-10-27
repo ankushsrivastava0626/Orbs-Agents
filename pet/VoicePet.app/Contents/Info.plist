@@ -17,6 +17,8 @@
 	</dict>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>OS mode hides the Dock and menu bar while it is on, and restores them afterwards.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Meeting mode records what your Mac plays (the other people on a call) along with your mic, so the transcript has everyone.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>OS mode lists your Bluetooth devices in its menu bar so you can connect or disconnect them.</string>
 	<key>NSLocationUsageDescription</key>
