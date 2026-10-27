@@ -21,3 +21,4 @@ timelog/
 run/
 meetings/
 meetings.db*
+tasks/

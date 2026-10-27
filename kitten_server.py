@@ -271,6 +271,8 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/status":
             self._ok(json.dumps(STATUS).encode())
+        elif self.path == "/task":           # the task board polls this
+            self._ok(json.dumps(task_view()).encode())
         elif self.path == "/meeting/live":   # the meeting board polls this while it's on; live passes run only then
             LIVE["seen"] = time.time()
             self._ok(json.dumps(meeting_live_view()).encode())
@@ -348,6 +350,13 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps({"muted": STATUS["muted_sessions"]}).encode()); return
+        if self.path in ("/task/record", "/task/ask", "/task/clear"):   # task board: record / reshape with Mercury / start over
+            try: v = (json.loads(body or "{}").get("text") or "").strip()
+            except Exception: v = ""
+            if self.path == "/task/record": (task_stop if TASK["recording"] else task_start)()
+            elif self.path == "/task/clear": task_clear()
+            else: task_ask(v)
+            self._ok(json.dumps(task_view()).encode()); return
         if self.path in ("/meeting/prompt", "/meeting/ask"):   # meeting board: the prompt for each line / one question
             try: v = (json.loads(body or "{}").get("text") or "").strip()
             except Exception: v = ""
@@ -650,7 +659,7 @@ def auto_listen():
     vad = load_silero_vad()
     CH = 512                                   # 32 ms at 16 kHz (Silero's frame size)
     while True:
-        if not STATUS["auto"] or STATUS["ptt"]:
+        if not STATUS["auto"] or STATUS["ptt"] or TASK["recording"]:   # task board recording: your words go there
             time.sleep(0.1); continue
         frames = queue.Queue()
         try:
@@ -668,7 +677,7 @@ def auto_listen():
         idle_since = None
         empty = 0
         try:
-            while STATUS["auto"] and not STATUS["ptt"]:
+            while STATUS["auto"] and not STATUS["ptt"] and not TASK["recording"]:
                 try: d = frames.get(timeout=0.5); empty = 0
                 except queue.Empty:
                     empty += 1
@@ -1185,6 +1194,112 @@ def meeting_live():
         time.sleep(LIVE_EVERY)
         if time.time() - LIVE["seen"] < 10 and MEETING["on"] and LIVE["folder"] == MEETING["folder"] and not LIVE["final"]:
             live_pass(LIVE["folder"])
+
+# ---- Task board: say a list (or anything), see it written down, then have Mercury reshape it ----
+TASKS = os.path.join(DIR, "tasks")
+TASK_FILE = os.path.join(TASKS, "current.json")      # what's on the board (survives restarts)
+TASK = {"recording": False, "started": 0, "pid": None, "folder": "", "live": "", "transcribing": False,
+        "original": "", "ai": "", "prompt": "", "busy": False}
+
+def task_view():
+    v = {k: TASK[k] for k in ("recording", "started", "live", "transcribing", "original", "ai", "prompt", "busy")}
+    v["ready"] = TASK["recording"] and os.path.exists(os.path.join(TASK["folder"], "mic.json"))   # the mic is really on
+    return v
+
+def task_save():
+    os.makedirs(TASKS, exist_ok=True)
+    json.dump({k: TASK[k] for k in ("original", "ai", "prompt")}, open(TASK_FILE, "w"))
+
+def task_load():
+    try: TASK.update(json.load(open(TASK_FILE)))
+    except Exception: pass
+
+def task_start():
+    import subprocess
+    if TASK["recording"] or TASK["transcribing"]: return
+    folder = os.path.join(TASKS, time.strftime("%Y-%m-%d %H-%M-%S"))
+    os.makedirs(folder, exist_ok=True)
+    proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
+                            stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, live="", proc=proc)
+    threading.Thread(target=task_live, args=(folder,), daemon=True).start()
+    print("task board: recording to", folder, flush=True)
+
+def task_snapshot(folder):
+    """What's been said so far: a copy of the recording with its header fixed, transcribed."""
+    import shutil
+    wav, snap = os.path.join(folder, "audio.wav"), os.path.join(folder, "snap.wav")
+    try: shutil.copyfile(wav, snap)
+    except OSError: return ""
+    subprocess_repair(snap)
+    try: return transcribe(snap)
+    finally:
+        try: os.unlink(snap)
+        except OSError: pass
+
+def task_live(folder):
+    """While recording: re-read the recording every few seconds so your words show up as you say them."""
+    while TASK["recording"] and TASK["folder"] == folder:
+        time.sleep(4)
+        if not TASK["recording"]: break
+        t = task_snapshot(folder)
+        if TASK["recording"] and TASK["folder"] == folder and t: TASK["live"] = t
+
+def task_stop():
+    if not TASK["recording"]: return
+    pid, folder = TASK["pid"], TASK["folder"]
+    TASK.update(recording=False, transcribing=True)
+    def finish():
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+        for _ in range(100):
+            if not _alive(pid): break
+            p = TASK.get("proc")
+            if p: p.poll()
+            time.sleep(0.1)
+        if _alive(pid):
+            try: os.kill(pid, signal.SIGKILL)
+            except OSError: pass
+        wav = os.path.join(folder, "audio.wav")
+        subprocess_repair(wav)
+        try:
+            text = transcribe(wav)
+        finally:
+            TASK.update(transcribing=False, live="")
+        if text:                                    # a second recording adds to what's already there
+            TASK["original"] = (TASK["original"].rstrip() + "\n\n" + text).strip() if TASK["original"] else text
+            open(os.path.join(folder, "original.txt"), "w").write(text)
+            try: os.unlink(wav)                     # the words are kept; the audio isn't needed
+            except OSError: pass
+        task_save()
+        print("task board: transcribed", len(text), "chars", flush=True)
+    threading.Thread(target=finish, daemon=True).start()
+
+def task_ask(prompt):
+    """Reshape what you said, with your instruction. Always from your original words, never from the last result."""
+    if not TASK["original"].strip() or not prompt or TASK["busy"]: return
+    TASK.update(busy=True, prompt=prompt)
+    def run():
+        try:
+            out = openrouter([
+                {"role": "system", "content": "The user spoke some text out loud (often a list of tasks); it was transcribed "
+                    "automatically, so fix obvious transcription slips. Rewrite it following the user's instruction. Keep "
+                    "every item they said unless told otherwise; don't invent new ones. Output only the result as clean "
+                    "plain text (lists as lines starting with '- ', short headings allowed), no preamble."},
+                {"role": "user", "content": "What I said:\n" + TASK["original"] + "\n\nInstruction: " + prompt}], max_tokens=1500)
+        except Exception as e:
+            out = "Couldn't reach Mercury: " + str(e)[:150]
+        TASK.update(ai=out, busy=False)
+        task_save()
+    threading.Thread(target=run, daemon=True).start()
+
+def task_clear():
+    if TASK["recording"] or TASK["transcribing"]: return
+    TASK.update(original="", ai="", prompt="", live="")
+    task_save()
+
+task_load()
 
 WATCH = {"beat": time.time()}
 
