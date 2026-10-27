@@ -302,6 +302,8 @@ class H(BaseHTTPRequestHandler):
                 if subprocess.run([TMUX, "has-session", "-t", target], capture_output=True).returncode == 0:
                     subprocess.run(["osascript", "-e", f'tell application "Terminal" to do script "{TMUX} attach -t {target}"'])
             STATUS.update(voice_claude="idle", voice_claude_at=time.time(), claude="idle", step="")
+            if not self.path.startswith("/claude/show"):          # the orb itself reads its own entry
+                STATUS["sessions"][target] = {"state": "idle", "step": "", "at": time.time()}
             print("menu:", self.path, flush=True)
             self._ok(); return
         if self.path == "/note/propose":     # add a note from text (same 1 s show-then-save flow)
