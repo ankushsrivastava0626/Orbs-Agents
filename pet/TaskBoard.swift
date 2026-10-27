@@ -41,10 +41,17 @@ final class TaskBoardModel: ObservableObject {
 
 struct TaskBoardView: View {
     @ObservedObject var m: TaskBoardModel
+    var measuring = false                        // laid out off-screen, unscrolled, to find the size that fits it all
+    @State private var hover = false
     @State private var now = Date()
     let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        if measuring { (m.flipped ? AnyView(back) : AnyView(front)).fixedSize(horizontal: false, vertical: true) }
+        else { live }
+    }
+
+    private var live: some View {
         ZStack {
             front.opacity(m.flipped ? 0 : 1)
             back.opacity(m.flipped ? 1 : 0)
@@ -52,7 +59,7 @@ struct TaskBoardView: View {
         }
         .rotation3DEffect(.degrees(m.flipped ? 180 : 0), axis: (x: 0, y: 1, z: 0), perspective: 0.4)
         .animation(.spring(response: 0.55, dampingFraction: 0.86), value: m.flipped)
-        .frame(minWidth: 260, maxWidth: .infinity, minHeight: 160, maxHeight: .infinity, alignment: .top)
+        .frame(minWidth: 260, maxWidth: .infinity, minHeight: 90, maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .bottomTrailing) {                     // resize grip (the edges resize too)
             Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 7, weight: .bold))
                 .foregroundColor(.white.opacity(0.2)).padding(6)
@@ -61,11 +68,17 @@ struct TaskBoardView: View {
         .opacity(m.shown ? 1 : 0)
         .animation(m.shown ? OSMotion.show : .easeInOut(duration: 0.35), value: m.shown)
         .onReceive(tick) { now = $0 }
+        .onHover { h in hover = h }
     }
 
-    private func card<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+    @ViewBuilder private func scroll<C: View>(@ViewBuilder _ c: () -> C) -> some View {
+        if measuring { c() } else { ScrollView { c() } }
+    }
+
+    private func card<H: View, C: View>(_ head: H, @ViewBuilder _ content: () -> C) -> some View {
         VStack(alignment: .leading, spacing: 0, content: content)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .frame(maxWidth: .infinity, maxHeight: measuring ? nil : .infinity, alignment: .top)
+            .overlay(alignment: .top) { if !measuring { header(head) } }
             .background(RoundedRectangle(cornerRadius: 16).fill(Color(white: 0.07).opacity(0.96))
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.12), lineWidth: 1)))
             .clipShape(RoundedRectangle(cornerRadius: 16))
@@ -85,25 +98,10 @@ struct TaskBoardView: View {
     // MARK: front — your own words
 
     private var front: some View {
-        card {
-            HStack(spacing: 7) {
-                Circle().fill(m.v.recording && m.v.ready ? Color.red : Color.white.opacity(0.25)).frame(width: 6, height: 6)
-                    .opacity(m.v.recording ? (Int(now.timeIntervalSince1970) % 4 < 2 ? 0.9 : 0.45) : 1)
-                    .animation(.easeInOut(duration: 1.2), value: Int(now.timeIntervalSince1970))
-                Text(status).font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white.opacity(0.55)).monospacedDigit().lineLimit(1)
-                Spacer()
-                if !m.v.original.isEmpty && !m.v.recording && !m.v.transcribing { editButton("original") }
-                if !m.v.recording && !m.v.transcribing && m.editing.isEmpty {
-                    iconButton("trash", "Delete this card", m.onDelete)
-                }
-                iconButton("plus", "New card (this one stays)", m.onNew)
-                if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show Mercury's version") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = true } }
-                iconButton("xmark", "Hide (the pet's Task board menu brings it back)", m.onClose)
-            }
-            .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
+        card(frontHeader) {
+            Color.clear.frame(height: 12)                    // the header only shows on hover (over the top)
 
-            ScrollView {
+            scroll {
                 VStack(alignment: .leading, spacing: 8) {
                     if m.editing == "original" { editor }
                     else if !m.v.original.isEmpty { bodyText(m.v.original, opacity: 0.92) }
@@ -153,6 +151,52 @@ struct TaskBoardView: View {
         }
     }
 
+    // the card's header: hidden until you hover the card, then it slides in over the top
+    private var frontHeader: some View {
+        HStack(spacing: 7) {
+            Circle().fill(m.v.recording && m.v.ready ? Color.red : Color.white.opacity(0.25)).frame(width: 6, height: 6)
+                .opacity(m.v.recording ? (Int(now.timeIntervalSince1970) % 4 < 2 ? 0.9 : 0.45) : 1)
+                .animation(.easeInOut(duration: 1.2), value: Int(now.timeIntervalSince1970))
+            Text(status).font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(.white.opacity(0.55)).monospacedDigit().lineLimit(1)
+            Spacer()
+            if !m.v.original.isEmpty && !m.v.recording && !m.v.transcribing { editButton("original") }
+            if !m.v.recording && !m.v.transcribing && m.editing.isEmpty {
+                iconButton("trash", "Delete this card", m.onDelete)
+            }
+            iconButton("plus", "New card (this one stays)", m.onNew)
+            if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show Mercury's version") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = true } }
+            iconButton("xmark", "Hide (the pet's Task board menu brings it back)", m.onClose)
+        }
+        .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
+    }
+
+    private var backHeader: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "sparkles").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.45))
+            Text(m.v.prompt.isEmpty ? "Mercury" : m.v.prompt).font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundColor(.white.opacity(0.55)).lineLimit(1).truncationMode(.tail)
+            Spacer()
+            editButton("ai")
+            iconButton("doc.on.doc", "Copy") {
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(m.v.ai, forType: .string)
+            }
+            iconButton("arrow.triangle.2.circlepath", "Back to what you said (write a new prompt there)") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = false }
+            iconButton("xmark", "Hide (the pet's Task board menu brings it back)", m.onClose)
+        }
+        .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
+    }
+
+    private func header<H: View>(_ h: H) -> some View {
+        h.background(LinearGradient(stops: [.init(color: Color(white: 0.07), location: 0),      // solid behind the icons,
+                                             .init(color: Color(white: 0.07), location: 0.78),   // then a short fade
+                                             .init(color: Color(white: 0.07).opacity(0), location: 1)],
+                                    startPoint: .top, endPoint: .bottom).padding(.bottom, -10))
+            .opacity(hover || !m.editing.isEmpty ? 1 : 0)
+            .offset(y: hover || !m.editing.isEmpty ? 0 : -6)
+            .animation(OSMotion.show, value: hover)
+    }
+
     private var canAsk: Bool {
         !m.prompt.trimmingCharacters(in: .whitespaces).isEmpty && !m.v.original.isEmpty && !m.v.busy
     }
@@ -160,22 +204,10 @@ struct TaskBoardView: View {
     // MARK: back — Mercury's version
 
     private var back: some View {
-        card {
-            HStack(spacing: 7) {
-                Image(systemName: "sparkles").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.45))
-                Text(m.v.prompt.isEmpty ? "Mercury" : m.v.prompt).font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white.opacity(0.55)).lineLimit(1).truncationMode(.tail)
-                Spacer()
-                editButton("ai")
-                iconButton("doc.on.doc", "Copy") {
-                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(m.v.ai, forType: .string)
-                }
-                iconButton("arrow.triangle.2.circlepath", "Back to what you said (write a new prompt there)") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = false }
-                iconButton("xmark", "Hide (the pet's Task board menu brings it back)", m.onClose)
-            }
-            .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
+        card(backHeader) {
+            Color.clear.frame(height: 12)
 
-            ScrollView {
+            scroll {
                 VStack(alignment: .leading, spacing: 4) {
                     if m.editing == "ai" { editor }
                     else {
@@ -316,18 +348,19 @@ final class TaskBoard: NSObject {
         peeking = true; peekActive = Date()
         let p = NSEvent.mouseLocation
         let s = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
-        // columns of one width; each card as tall as its whole text, placed in the shortest column
+        // each card at the size that shows all of it, laid out in rows from the top-left
         let gap: CGFloat = 12, margin: CGFloat = 16
-        let w = s.width - 2 * margin, maxH = s.height - 2 * margin
-        let cols = max(1, min(ids.count, Int((w + gap) / (340 + gap))))
-        let cw = min(460, (w - gap * CGFloat(cols - 1)) / CGFloat(cols))
-        var tops = [CGFloat](repeating: s.maxY - margin, count: cols)
+        let maxW = min(460, s.width - 2 * margin), maxH = s.height - 2 * margin
+        var x = s.minX + margin, top = s.maxY - margin, rowH: CGFloat = 0
         for id in ids {
             guard let b = boards[id] else { continue }
-            let h = min(maxH, max(160, b.fittingHeight(width: cw)))
-            let c = tops.indices.min { tops[$0] > tops[$1] } ?? 0     // the column with the most room left
-            b.peek(to: NSRect(x: s.minX + margin + CGFloat(c) * (cw + gap), y: tops[c] - h, width: cw, height: h))
-            tops[c] -= h + gap
+            let f = b.fittingSize(maxWidth: maxW)
+            let w = f.width, h = min(maxH, f.height)
+            if x + w > s.maxX - margin && x > s.minX + margin {      // no room left in this row: start the next
+                x = s.minX + margin; top -= rowH + gap; rowH = 0
+            }
+            b.peek(to: NSRect(x: x, y: top - h, width: w, height: h))
+            x += w + gap; rowH = max(rowH, h)
         }
         peekTimer?.invalidate()
         peekTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -461,7 +494,7 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
             p.level = .floating
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
             p.isMovableByWindowBackground = true
-            p.minSize = NSSize(width: 260, height: 160)
+            p.minSize = NSSize(width: 260, height: 90)
             p.contentView = NSHostingView(rootView: TaskBoardView(m: m))
             p.delegate = self
             var r = UserDefaults.standard.string(forKey: frameKey).map(NSRectFromString) ?? .zero
@@ -496,32 +529,18 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
 
     var frame: NSRect? { panel?.frame }
 
-    /// How tall the card has to be at this width to show everything on the side it's showing.
-    func fittingHeight(width: CGFloat) -> CGFloat {
-        let base = NSFont.systemFont(ofSize: 13, weight: .medium)
-        let font = base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 13) } ?? base
-        let para = NSMutableParagraphStyle(); para.lineSpacing = 2
-        func height(_ t: String, _ w: CGFloat) -> CGFloat {
-            guard !t.isEmpty else { return 0 }
-            return ceil((t as NSString).boundingRect(with: NSSize(width: max(40, w), height: .greatestFiniteMagnitude),
-                options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font, .paragraphStyle: para]).height)
-        }
-        let inner = width - 28                                      // the text's side padding
-        if m.flipped {                                              // Mercury's lines: bullets, indents, headings
-            var h: CGFloat = 0
-            for raw in m.v.ai.components(separatedBy: "\n") {
-                let lead = raw.prefix { $0 == " " || $0 == "\t" }.count
-                let line = raw.trimmingCharacters(in: .whitespaces)
-                if line.isEmpty { h += 8; continue }
-                let heading = line.hasPrefix("#") || (line.hasSuffix(":") && line.count < 40)
-                h += height(line, inner - CGFloat(min(4, lead / 2)) * 16 - (heading ? 0 : 12)) + 4 + (heading ? 8 : 0)
-            }
-            return 34 + h + 14 + 12                                 // header, lines, bottom padding, slack
-        }
-        let said = [m.v.original, m.v.live].filter { !$0.isEmpty }
-        let text = said.isEmpty ? 40 : said.map { height($0, inner) }.reduce(0, +) + CGFloat(said.count - 1) * 8
-        return 34 + text + 10 + 48 + 12                             // header, words, padding, record bar, slack
+    /// The size that shows everything on the side it's showing: the narrowest width (from 260 up to `maxWidth`)
+    /// that doesn't add lines, and the height it then needs. Measured from the card's real layout, off-screen.
+    func fittingSize(maxWidth: CGFloat) -> NSSize {
+        let host = NSHostingController(rootView: TaskBoardView(m: m, measuring: true))
+        func h(_ w: CGFloat) -> CGFloat { ceil(host.sizeThatFits(in: CGSize(width: w, height: 100_000)).height) }
+        let full = h(maxWidth)
+        var lo: CGFloat = 260, hi = maxWidth                     // narrowest width still at the full-width height
+        if h(lo) <= full { return NSSize(width: lo, height: full) }
+        while hi - lo > 8 { let mid = (lo + hi) / 2; if h(mid) <= full { hi = mid } else { lo = mid } }
+        return NSSize(width: ceil(hi), height: full)
     }
+
     private var peeked = false                   // laid out by the quick look: don't remember that spot
 
     func peek(to r: NSRect) {
