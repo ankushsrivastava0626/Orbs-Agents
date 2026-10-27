@@ -350,6 +350,15 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps({"muted": STATUS["muted_sessions"]}).encode()); return
+        if self.path == "/task/edit":           # your own edits: {"original": ...} or {"ai": ...}
+            try:
+                ev = json.loads(body or "{}")
+                for k in ("original", "ai"):
+                    if isinstance(ev.get(k), str): TASK[k] = ev[k].strip()
+                task_save()
+            except Exception:
+                pass
+            self._ok(json.dumps(task_view()).encode()); return
         if self.path in ("/task/record", "/task/ask", "/task/clear"):   # task board: record / reshape with Mercury / start over
             try: v = (json.loads(body or "{}").get("text") or "").strip()
             except Exception: v = ""
@@ -1123,7 +1132,7 @@ def transcript_lines(segs, upto=None):
 
 OPENROUTER_MODEL = "inception/mercury-3"
 
-def openrouter(messages, max_tokens=900):
+def openrouter(messages, max_tokens=4000):
     """One reply from Mercury on OpenRouter. The key is read from your .env (never stored here)."""
     import urllib.request
     env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/Githubs/.env"))
@@ -1135,7 +1144,11 @@ def openrouter(messages, max_tokens=900):
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Title": "VoicePet meeting board"})
     d = json.loads(urllib.request.urlopen(req, timeout=90).read())
     if d.get("error"): raise RuntimeError(str(d["error"])[:200])
-    return (d["choices"][0]["message"].get("content") or "").strip()
+    out = (d["choices"][0]["message"].get("content") or "").strip()
+    if not out and max_tokens < 12000:             # it spent the whole budget thinking: once more with 3x room
+        print("openrouter: empty reply after", (d.get("usage") or {}).get("completion_tokens"), "tokens; retrying", flush=True)
+        return openrouter(messages, max_tokens * 3)
+    return out
 
 ai_pool = None
 
@@ -1184,7 +1197,7 @@ def meeting_ask(q):
                 "one of them). Refer to people by their speaker number and time when it helps. Be concise and plain text. "
                 "If the transcript doesn't say, say so."},
             {"role": "user", "content": "Transcript so far:\n" + ("\n".join(lines) or "(nothing transcribed yet)")
-                + "\n\nQuestion: " + q}], max_tokens=1500)
+                + "\n\nQuestion: " + q}])
     except Exception as e:
         a = "Couldn't get an answer: " + str(e)[:150]
     LIVE["ask"] = {"q": q, "a": a, "busy": False}
@@ -1294,7 +1307,8 @@ def task_ask(prompt):
                     "automatically, so fix obvious transcription slips. Rewrite it following the user's instruction. Keep "
                     "every item they said unless told otherwise; don't invent new ones. Output only the result as clean "
                     "plain text (lists as lines starting with '- ', short headings allowed), no preamble."},
-                {"role": "user", "content": "What I said:\n" + TASK["original"] + "\n\nInstruction: " + prompt}], max_tokens=1500)
+                {"role": "user", "content": "What I said:\n" + TASK["original"] + "\n\nInstruction: " + prompt}])
+            if not out: out = "Mercury came back empty. Try the prompt again."
         except Exception as e:
             out = "Couldn't reach Mercury: " + str(e)[:150]
         TASK.update(ai=out, busy=False)

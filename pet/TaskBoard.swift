@@ -16,6 +16,13 @@ final class TaskBoardModel: ObservableObject {
     @Published var flipped = false              // showing Mercury's version
     @Published var prompt = ""
     @Published var sent = false                 // a prompt is out: flip when its answer lands
+    @Published var editing = ""                 // "original" / "ai" while you edit that side
+    @Published var draft = ""
+    var onSaveEdit: () -> Void = {}
+    func edit(_ side: String) {
+        if editing == side { onSaveEdit(); return }                // the checkmark: save
+        draft = side == "ai" ? v.ai : v.original; editing = side
+    }
     var onClose: () -> Void = {}
     var onRecord: () -> Void = {}
     var onAsk: () -> Void = {}
@@ -77,16 +84,18 @@ struct TaskBoardView: View {
                     .foregroundColor(.white.opacity(0.55)).monospacedDigit().lineLimit(1)
                 Spacer()
                 if !m.v.original.isEmpty && !m.v.recording && !m.v.transcribing {
-                    iconButton("trash", "Start over", m.onClear)
+                    editButton("original")
+                    if m.editing != "original" { iconButton("trash", "Start over", m.onClear) }
                 }
-                if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show Mercury's version") { m.flipped = true } }
+                if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show Mercury's version") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = true } }
                 iconButton("xmark", "Close the task board", m.onClose)
             }
             .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
-                    if !m.v.original.isEmpty { bodyText(m.v.original, opacity: 0.92) }
+                    if m.editing == "original" { editor }
+                    else if !m.v.original.isEmpty { bodyText(m.v.original, opacity: 0.92) }
                     if m.v.recording && !m.v.live.isEmpty { bodyText(m.v.live, opacity: 0.6) }   // still being said
                     if m.v.original.isEmpty && m.v.live.isEmpty {
                         Text(m.v.recording ? "Listening… your words show up in a few seconds."
@@ -145,18 +154,22 @@ struct TaskBoardView: View {
                 Text(m.v.prompt.isEmpty ? "Mercury" : m.v.prompt).font(.system(size: 10, weight: .semibold, design: .rounded))
                     .foregroundColor(.white.opacity(0.55)).lineLimit(1).truncationMode(.tail)
                 Spacer()
+                editButton("ai")
                 iconButton("doc.on.doc", "Copy") {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(m.v.ai, forType: .string)
                 }
-                iconButton("arrow.triangle.2.circlepath", "Back to what you said (write a new prompt there)") { m.flipped = false }
+                iconButton("arrow.triangle.2.circlepath", "Back to what you said (write a new prompt there)") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = false }
                 iconButton("xmark", "Close the task board", m.onClose)
             }
             .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(m.v.ai.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                        aiLine(line)
+                    if m.editing == "ai" { editor }
+                    else {
+                        ForEach(Array(m.v.ai.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
+                            aiLine(line)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -190,6 +203,19 @@ struct TaskBoardView: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
+    private var editor: some View {
+        TextEditor(text: $m.draft)
+            .font(.system(size: 13, weight: .medium, design: .rounded)).foregroundColor(.white.opacity(0.92))
+            .scrollContentBackground(.hidden).lineSpacing(2)
+            .frame(minHeight: 160)
+            .padding(6)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.05)))
+    }
+
+    private func editButton(_ side: String) -> some View {
+        iconButton(m.editing == side ? "checkmark" : "pencil", m.editing == side ? "Save your edit" : "Edit") { m.edit(side) }
+    }
+
     private func iconButton(_ icon: String, _ help: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon).font(.system(size: 8, weight: .bold)).foregroundColor(.white.opacity(0.55))
@@ -211,6 +237,7 @@ final class TaskBoard: NSObject, NSWindowDelegate {
     /// Hold `: the board comes up and records until you let go; it stays open with what you said.
     func hold(_ down: Bool) {
         if down {
+            if !m.editing.isEmpty { m.onSaveEdit() }
             if !enabled { UserDefaults.standard.set(true, forKey: Self.enabledKey); start() } else if !m.shown { show() }
             m.flipped = false
             m.v.recording = true; m.v.ready = false; m.v.started = Date().timeIntervalSince1970
@@ -239,6 +266,7 @@ final class TaskBoard: NSObject, NSWindowDelegate {
         m.onClose = { [weak self] in self?.stop() }
         m.onRecord = { [weak self] in
             guard let self else { return }
+            if !self.m.editing.isEmpty { self.m.onSaveEdit() }       // keep your edit, then record more
             self.m.flipped = false
             self.m.v.recording.toggle()                          // feels instant; the next poll confirms
             if self.m.v.recording { self.m.v.started = Date().timeIntervalSince1970 }
@@ -250,6 +278,18 @@ final class TaskBoard: NSObject, NSWindowDelegate {
             guard !q.isEmpty, !self.m.v.original.isEmpty, !self.m.v.busy else { return }
             self.m.sent = true; self.sawBusy = false; self.m.v.busy = true; self.m.prompt = ""
             self.post("/task/ask", q)
+        }
+        m.onSaveEdit = { [weak self] in
+            guard let self else { return }
+            let side = self.m.editing, text = self.m.draft
+            self.m.editing = ""
+            if side == "ai" { self.m.v.ai = text } else { self.m.v.original = text }   // show it now; the server confirms
+            var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/task/edit")!)
+            req.httpMethod = "POST"; req.timeoutInterval = 3
+            req.httpBody = try? JSONSerialization.data(withJSONObject: [side: text])
+            URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                DispatchQueue.main.async { self?.apply(data) }
+            }.resume()
         }
         m.onClear = { [weak self] in
             self?.m.flipped = false
