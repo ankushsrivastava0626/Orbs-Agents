@@ -353,7 +353,9 @@ class H(BaseHTTPRequestHandler):
         if self.path in ("/task/record", "/task/ask", "/task/clear"):   # task board: record / reshape with Mercury / start over
             try: v = (json.loads(body or "{}").get("text") or "").strip()
             except Exception: v = ""
-            if self.path == "/task/record": (task_stop if TASK["recording"] else task_start)()
+            if self.path == "/task/record":           # "start" / "stop" (hold `), or toggle
+                want = {"start": True, "stop": False}.get(v, not TASK["recording"])
+                (task_start if want else task_stop)()
             elif self.path == "/task/clear": task_clear()
             else: task_ask(v)
             self._ok(json.dumps(task_view()).encode()); return
@@ -1216,7 +1218,10 @@ def task_load():
 
 def task_start():
     import subprocess
-    if TASK["recording"] or TASK["transcribing"]: return
+    if TASK["recording"]: return
+    for _ in range(100):                        # the last one is still being written down: queue behind it
+        if not TASK["transcribing"]: break
+        time.sleep(0.1)
     folder = os.path.join(TASKS, time.strftime("%Y-%m-%d %H-%M-%S"))
     os.makedirs(folder, exist_ok=True)
     proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
@@ -1272,6 +1277,8 @@ def task_stop():
             open(os.path.join(folder, "original.txt"), "w").write(text)
             try: os.unlink(wav)                     # the words are kept; the audio isn't needed
             except OSError: pass
+        else:                                       # nothing said: leave nothing behind
+            import shutil; shutil.rmtree(folder, ignore_errors=True)
         task_save()
         print("task board: transcribed", len(text), "chars", flush=True)
     threading.Thread(target=finish, daemon=True).start()

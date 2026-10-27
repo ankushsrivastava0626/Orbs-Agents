@@ -271,6 +271,12 @@ final class SessionsController: NSObject {
     private func handleKey(_ type: CGEventType, _ e: CGEvent) -> Bool {
         let code = Int(e.getIntegerValueField(.keyboardEventKeycode))
         let flags = e.flags.rawValue
+        if capturing == nil, e.getIntegerValueField(.eventSourceUserData) != Self.replayMark {
+            if code == Self.taskKey, type != .flagsChanged { return taskKey(type, e) }
+            if type == .keyDown, let d = taskDown, !taskLive {          // typing fast after a `: it was just a `
+                taskDown = nil; replay(d)
+            }
+        }
         var down: Bool
         if type == .flagsChanged {
             guard let bit = Hotkey.modifierBits[code] else { return false }
@@ -332,6 +338,27 @@ final class SessionsController: NSObject {
     }
 
     private static let holdDelay = 0.3
+
+    // MARK: hold ` : task board (opens it and records while held; a quick tap still types `)
+    static let taskKey = 50
+    private var taskDown: CGEvent? = nil, taskLive = false
+
+    private func taskKey(_ type: CGEventType, _ e: CGEvent) -> Bool {
+        if type == .keyDown {
+            if e.getIntegerValueField(.keyboardEventAutorepeat) != 0 { return taskDown != nil || taskLive }
+            if e.flags.rawValue & 0x1E0000 != 0 { return false }       // ⌘` (switch windows), ~ and the like
+            taskDown = e.copy(); taskLive = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdDelay) { [weak self] in
+                guard let self, self.taskDown != nil else { return }
+                self.taskDown = nil; self.taskLive = true
+                self.app?.taskBoard.hold(true)
+            }
+            return true
+        }
+        if taskLive { taskLive = false; DispatchQueue.main.async { self.app?.taskBoard.hold(false) }; return true }
+        if let d = taskDown { taskDown = nil; replay(d); replay(e); return true }   // a tap: type it
+        return false
+    }
     private static let replayMark: Int64 = 0x564F4943                   // "VOIC"
 
     /// Re-send a key event we held back, marked so our own tap lets it through.

@@ -90,7 +90,7 @@ struct TaskBoardView: View {
                     if m.v.recording && !m.v.live.isEmpty { bodyText(m.v.live, opacity: 0.6) }   // still being said
                     if m.v.original.isEmpty && m.v.live.isEmpty {
                         Text(m.v.recording ? "Listening… your words show up in a few seconds."
-                             : m.v.transcribing ? "" : "Hit record and say your tasks.")
+                             : m.v.transcribing ? "" : "Hold ` (or hit record) and say your tasks.")
                             .font(.system(size: 12, design: .rounded)).foregroundColor(.white.opacity(0.35))
                     }
                     if m.v.transcribing { ProgressView().controlSize(.small).scaleEffect(0.7, anchor: .leading) }
@@ -207,13 +207,26 @@ final class TaskBoard: NSObject, NSWindowDelegate {
     var enabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
 
     func restore() { if enabled { start() } }
+
+    /// Hold `: the board comes up and records until you let go; it stays open with what you said.
+    func hold(_ down: Bool) {
+        if down {
+            if !enabled { UserDefaults.standard.set(true, forKey: Self.enabledKey); start() } else if !m.shown { show() }
+            m.flipped = false
+            m.v.recording = true; m.v.ready = false; m.v.started = Date().timeIntervalSince1970
+            post("/task/record", "start")
+        } else {
+            m.v.recording = false
+            post("/task/record", "stop")
+        }
+    }
     func toggle() {
         if enabled { stop() } else { UserDefaults.standard.set(true, forKey: Self.enabledKey); start() }
     }
 
     private func stop() {
         UserDefaults.standard.set(false, forKey: Self.enabledKey)
-        if m.v.recording { post("/task/record") }                // closing mid-recording keeps what was said
+        if m.v.recording { post("/task/record", "stop") }                // closing mid-recording keeps what was said
         timer?.invalidate(); timer = nil
         m.shown = false
         let p = panel
@@ -229,7 +242,7 @@ final class TaskBoard: NSObject, NSWindowDelegate {
             self.m.flipped = false
             self.m.v.recording.toggle()                          // feels instant; the next poll confirms
             if self.m.v.recording { self.m.v.started = Date().timeIntervalSince1970 }
-            self.post("/task/record")
+            self.post("/task/record", self.m.v.recording ? "start" : "stop")
         }
         m.onAsk = { [weak self] in
             guard let self else { return }
