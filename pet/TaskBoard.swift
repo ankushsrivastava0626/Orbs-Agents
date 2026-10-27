@@ -3,7 +3,8 @@
 // and the card flips to its version. Flip back to see what you actually said and try a different prompt —
 // every prompt starts from your own words, never from the last result. Each card is its own board on screen:
 // + or holding ` opens another; ✕ only hides one (the pet's "Task board" menu item brings them all back);
-// the trash deletes that card.
+// the trash deletes that card. Pin the pointer in the top-left corner for a quick look: every card, hidden
+// ones too, laid out in a grid until you click somewhere else or leave them alone for a few seconds.
 import AppKit
 import SwiftUI
 
@@ -257,6 +258,8 @@ struct TaskBoardView: View {
 /// Every card on screen: polls the voice server and keeps one window per card in step with it.
 final class TaskBoard: NSObject {
     private var boards: [String: TaskCardWindow] = [:]
+    private var order: [String] = []             // oldest first, as the server keeps them
+    private var hiddenIDs: Set<String> = []
     private var timer: Timer?
     var enabled: Bool { boards.values.contains { $0.m.shown } }   // the menu's checkmark
 
@@ -264,6 +267,78 @@ final class TaskBoard: NSObject {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.poll() }
         poll()
+        startCornerWatch()
+    }
+
+    // MARK: quick look (top-left corner, like Pane's top-right one)
+
+    private var peeking = false
+    private var peekActive = Date()              // last time the pointer was on a card (or the corner)
+    private var peekTimer: Timer?
+    private var monitors: [Any] = []
+    private static let peekLinger: TimeInterval = 6
+
+    private func startCornerWatch() {
+        guard monitors.isEmpty else { return }
+        for mask in [NSEvent.EventTypeMask.mouseMoved, .leftMouseDragged] {
+            if let m = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] _ in self?.mouseMoved() }) {
+                monitors.append(m)
+            }
+        }
+        // a click anywhere else ends it (our own clicks on a card never reach a global monitor)
+        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown], handler: { [weak self] _ in
+            guard let self, self.peeking, !self.pointerOnCard() else { return }
+            self.endPeek()
+        }) { monitors.append(m) }
+    }
+
+    private func mouseMoved() {
+        if Self.pointerInCorner() {
+            if !peeking { startPeek() }
+            peekActive = Date()
+        }
+    }
+
+    private static func pointerInCorner() -> Bool {
+        let p = NSEvent.mouseLocation
+        guard let f = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.main)?.frame else { return false }
+        return p.x <= f.minX + 1 && p.y >= f.maxY - 1              // pinned in the corner, not just near it
+    }
+
+    private func pointerOnCard() -> Bool {
+        let p = NSEvent.mouseLocation
+        return boards.values.contains { $0.m.shown && ($0.frame?.contains(p) ?? false) }
+    }
+
+    private func startPeek() {
+        let ids = order.filter { boards[$0] != nil }
+        guard !ids.isEmpty else { return }
+        peeking = true; peekActive = Date()
+        let p = NSEvent.mouseLocation
+        let s = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let gap: CGFloat = 12, margin: CGFloat = 16
+        let w = s.width - 2 * margin, h = s.height - 2 * margin, n = CGFloat(ids.count)
+        let cols = max(1, min(n, (n * w / h).squareRoot().rounded(.up)))
+        let rows = (n / cols).rounded(.up)
+        let cw = min(420, (w - gap * (cols - 1)) / cols), ch = min(480, (h - gap * (rows - 1)) / rows)
+        for (i, id) in ids.enumerated() {
+            let c = CGFloat(i % Int(cols)), r = CGFloat(i / Int(cols))
+            boards[id]?.peek(to: NSRect(x: s.minX + margin + c * (cw + gap),
+                                        y: s.maxY - margin - (r + 1) * ch - r * gap, width: cw, height: ch))
+        }
+        peekTimer?.invalidate()
+        peekTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.pointerOnCard() || Self.pointerInCorner() { self.peekActive = Date() }
+            if Date().timeIntervalSince(self.peekActive) > Self.peekLinger { self.endPeek() }
+        }
+    }
+
+    private func endPeek() {
+        guard peeking else { return }
+        peeking = false
+        peekTimer?.invalidate(); peekTimer = nil
+        for (id, b) in boards { b.unpeek(hidden: hiddenIDs.contains(id)) }
     }
 
     /// The pet's menu: every card back on screen (a new empty one if there are none).
@@ -293,6 +368,8 @@ final class TaskBoard: NSObject {
         guard let data, let t = try? JSONDecoder().decode(ServerTasks.self, from: data) else { return }
         let ids = Set(t.cards.map(\.id))
         for (id, b) in boards where !ids.contains(id) { b.close(); boards[id] = nil }   // deleted
+        order = t.cards.map(\.id)
+        hiddenIDs = Set(t.cards.filter(\.hidden).map(\.id))
         for c in t.cards {
             let mine = t.rec.card == c.id
             var v = TaskView()
@@ -300,14 +377,14 @@ final class TaskBoard: NSObject {
             v.recording = mine && t.rec.recording; v.ready = mine && t.rec.ready; v.started = t.rec.started
             v.transcribing = mine && t.rec.transcribing; v.live = mine ? t.rec.live : ""
             v.otherRecording = t.rec.recording && !mine
-            if c.hidden { boards[c.id]?.hide(); continue }
             let b = boards[c.id] ?? {
                 let b = TaskCardWindow(id: c.id, board: self, place: boards.count)
                 boards[c.id] = b
                 return b
             }()
             b.update(v)
-            if !b.m.shown { b.show() }
+            if peeking { continue }                                  // the quick look decides what's showing
+            if c.hidden { b.hide() } else if !b.m.shown { b.show() }
         }
     }
 }
@@ -414,10 +491,33 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { p?.close() }
     }
 
+    var frame: NSRect? { panel?.frame }
+    private var peeked = false                   // laid out by the quick look: don't remember that spot
+
+    func peek(to r: NSRect) {
+        let fresh = panel == nil || !m.shown
+        show()
+        peeked = true
+        guard let p = panel else { return }
+        if fresh { p.setFrame(r, display: true) }
+        else { NSAnimationContext.runAnimationGroup { $0.duration = 0.3; p.animator().setFrame(r, display: true) } }
+    }
+
+    func unpeek(hidden: Bool) {
+        guard peeked, let p = panel else { return }
+        if hidden { hide() }
+        let back = UserDefaults.standard.string(forKey: frameKey).map(NSRectFromString) ?? p.frame
+        DispatchQueue.main.asyncAfter(deadline: .now() + (hidden ? 0.36 : 0)) { [weak self] in
+            if hidden { p.setFrame(back, display: false) }
+            else { NSAnimationContext.runAnimationGroup { $0.duration = 0.3; p.animator().setFrame(back, display: true) } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { self?.peeked = false }
+        }
+    }
+
     func windowDidMove(_ n: Notification) { remember() }
     func windowDidEndLiveResize(_ n: Notification) { remember() }
     private func remember() {
-        guard let p = panel else { return }
+        guard let p = panel, !peeked else { return }
         UserDefaults.standard.set(NSStringFromRect(p.frame), forKey: frameKey)
     }
 }
