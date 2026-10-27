@@ -837,6 +837,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func menuMeetingBoard() { meetingBoard.toggle() }
     let taskBoard = TaskBoard()
     @objc func menuTaskBoard() { taskBoard.toggle() }
+    @objc func menuResetPeek() { taskBoard.resetPeekLayout() }
 
     func toggleMeeting() {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/meeting")!)
@@ -1146,6 +1147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item(model.s.meeting ? "Stop recording meeting (right Option ×2)" : "Record meeting (right Option ×2)", #selector(menuMeeting))
         item("Meeting board (live transcript)", #selector(menuMeetingBoard), on: meetingBoard.enabled)
         item("Task boards (show all)", #selector(menuTaskBoard), on: taskBoard.enabled)
+        item("Reset task quick-look layout", #selector(menuResetPeek), on: false)
         item("Record Mac audio in meetings", #selector(menuMacAudio), on: systemAudio.enabled)
         item("Open meetings folder", #selector(menuOpenMeetings))
         item("Tunnel vision (Esc to exit)", #selector(menuTunnel), on: !tunnelPanels.isEmpty)

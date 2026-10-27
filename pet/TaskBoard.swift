@@ -356,6 +356,9 @@ final class TaskBoard: NSObject {
             guard let b = boards[id] else { continue }
             let f = b.fittingSize(maxWidth: maxW)
             let w = f.width, h = min(maxH, f.height)
+            if let top = b.peekSpot {                                   // you put this one somewhere yourself
+                b.peek(to: NSRect(x: top.x, y: top.y - h, width: w, height: h)); continue
+            }
             if x + w > s.maxX - margin && x > s.minX + margin {      // no room left in this row: start the next
                 x = s.minX + margin; top -= rowH + gap; rowH = 0
             }
@@ -367,6 +370,13 @@ final class TaskBoard: NSObject {
             guard let self else { return }
             if self.pointerOnCard() || Self.pointerInCorner() { self.peekActive = Date() }
             if Date().timeIntervalSince(self.peekActive) > Self.peekLinger { self.endPeek() }
+        }
+    }
+
+    /// The pet's menu: forget where you dragged cards in the quick look.
+    func resetPeekLayout() {
+        for k in UserDefaults.standard.dictionaryRepresentation().keys where k.hasPrefix("taskPeekSpot.") {
+            UserDefaults.standard.removeObject(forKey: k)
         }
     }
 
@@ -523,11 +533,18 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
     func close() {
         hide()
         UserDefaults.standard.removeObject(forKey: frameKey)
+        UserDefaults.standard.removeObject(forKey: "taskPeekSpot." + id)
         let p = panel
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { p?.close() }
     }
 
     var frame: NSRect? { panel?.frame }
+
+    /// Where you dragged this card in the quick look (its top-left corner), if you did.
+    var peekSpot: NSPoint? {
+        UserDefaults.standard.string(forKey: "taskPeekSpot." + id).map(NSPointFromString)
+    }
+    private var userMoving = false               // you started dragging it (macOS asks only for your own drags)
 
     /// The size that shows everything on the side it's showing: the narrowest width (from 260 up to `maxWidth`)
     /// that doesn't add lines, and the height it then needs. Measured from the card's real layout, off-screen.
@@ -548,12 +565,14 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
         show()
         peeked = true
         guard let p = panel else { return }
+        userMoving = false
         if fresh { p.setFrame(r, display: true) }
         else { NSAnimationContext.runAnimationGroup { $0.duration = 0.3; p.animator().setFrame(r, display: true) } }
     }
 
     func unpeek(hidden: Bool) {
         guard peeked, let p = panel else { return }
+        userMoving = false
         if hidden { hide() }
         let back = UserDefaults.standard.string(forKey: frameKey).map(NSRectFromString) ?? p.frame
         DispatchQueue.main.asyncAfter(deadline: .now() + (hidden ? 0.36 : 0)) { [weak self] in
@@ -563,7 +582,13 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    func windowDidMove(_ n: Notification) { remember() }
+    func windowWillMove(_ n: Notification) { userMoving = true }
+    func windowDidMove(_ n: Notification) {
+        if peeked, userMoving, let p = panel {                       // you dragged it during the quick look
+            UserDefaults.standard.set(NSStringFromPoint(NSPoint(x: p.frame.minX, y: p.frame.maxY)), forKey: "taskPeekSpot." + id)
+        }
+        remember()
+    }
     func windowDidEndLiveResize(_ n: Notification) { remember() }
     private func remember() {
         guard let p = panel, !peeked else { return }
