@@ -542,7 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         DispatchQueue.main.async { [weak self] in self?.canvas.restore(); TaskTimer.shared.installStatusItem(); self?.pomodoro.show(); self?.meetingBadge.show() }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon, never steals focus
-        model.orbFrames = { [weak self] in self?.orbPanels.map(\.frame) ?? [] }
+        model.orbFrames = { [weak self] in self?.orbPanels.filter { $0.alphaValue > 0.01 }.map(\.frame) ?? [] }   // the hidden corner orb must not catch hover over the strip
         model.onCardActive = { [weak self] visible, wantsKeys in
             guard let self else { return }
             for p in self.cardPanels {
@@ -656,7 +656,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Above its orb in the dock (OS mode), or above the corner orb otherwise; the tail points at the orb.
     func placeBubble(_ session: String) {
         guard let (m, p) = bubbles[session] else { return }
-        let orb = (osMode.on ? OrbAnchors.shared.screenRect(session) : nil)
+        let orb = OrbAnchors.shared.screenRect(session)                // its own orb, in the dock or the strip
             ?? orbPanels.first?.frame
             ?? NSRect(x: NSScreen.screens[0].frame.maxX - 60, y: 20, width: 40, height: 40)
         let screen = NSScreen.screens.first { $0.frame.intersects(orb) }?.frame ?? NSScreen.screens[0].frame
