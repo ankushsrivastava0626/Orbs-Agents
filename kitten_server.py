@@ -271,6 +271,9 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/status":
             self._ok(json.dumps(STATUS).encode())
+        elif self.path == "/meeting/live":   # the meeting board polls this while it's on; live passes run only then
+            LIVE["seen"] = time.time()
+            self._ok(json.dumps(meeting_live_view()).encode())
         else:
             self._ok(MODEL_NAME.encode())
     def do_POST(self):
@@ -824,6 +827,7 @@ def meeting_start():
                             stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
                             start_new_session=True)            # its own process group: our restarts don't kill it
     MEETING.update(on=True, started=time.time(), folder=folder, pid=proc.pid, proc=proc)
+    LIVE.update(folder=folder, segs=[], offset=WAV_HEADER, final=False)
     json.dump({"pid": proc.pid, "folder": folder, "started": MEETING["started"]}, open(ACTIVE, "w"))
     STATUS.update(meeting=True, meeting_started=MEETING["started"], meeting_folder=folder)
     print("meeting: recording to", folder, "pid", proc.pid, flush=True)
@@ -863,6 +867,7 @@ def meeting_recover():
         MEETING.update(on=True, started=a["started"], folder=a["folder"], pid=a["pid"], proc=None)
         STATUS.update(meeting=True, meeting_started=a["started"], meeting_folder=a["folder"])
         print("meeting: still recording", a["folder"], flush=True)
+        live_load(a["folder"])
     elif a:
         try: os.unlink(ACTIVE)
         except OSError: pass
@@ -915,11 +920,90 @@ def meeting_transcribe(folder, wav):
         for junk in (wav, os.path.join(folder, "recorder.log")):   # transcript saved: the audio isn't kept
             try: os.remove(junk)
             except OSError: pass
+        if LIVE["folder"] == folder:                    # the board switches to the final transcript
+            LIVE.update(segs=[{"start": g.get("startMs", 0), "end": g.get("endMs", 0), "speaker": g.get("speakerLabel") or "Speaker",
+                               "text": g.get("text", "").strip()} for g in segs], final=True)
+        try: os.remove(os.path.join(folder, "live.json"))
+        except OSError: pass
         STATUS.update(meeting_done=folder, meeting_done_at=time.time())
     except Exception as e:
         print("meeting: transcription failed:", repr(e), flush=True)
     finally:
         STATUS["meeting_transcribing"] = False
+
+# ---- meeting board: live transcription while recording (only while the board is on) ----
+WAV_HEADER = 44                                  # meeting_rec.py: 16 kHz mono 16-bit, samples after 44 bytes
+LIVE = {"seen": 0, "folder": "", "segs": [], "offset": WAV_HEADER, "final": False}
+LIVE_DB = os.path.join(DIR, "meetings-live.db")
+LIVE_EVERY = 15                                  # seconds of new audio per pass
+
+def live_load(folder):
+    LIVE.update(folder=folder, segs=[], offset=WAV_HEADER, final=False)
+    try:
+        d = json.load(open(os.path.join(folder, "live.json")))
+        LIVE.update(segs=d.get("segs", []), offset=d.get("offset", WAV_HEADER))
+    except Exception:
+        pass
+
+def meeting_live_view():
+    return {"recording": MEETING["on"], "started": MEETING.get("started", 0),
+            "transcribing": STATUS.get("meeting_transcribing", False), "final": LIVE["final"],
+            "folder": LIVE["folder"], "segments": LIVE["segs"]}
+
+def live_pass(folder):
+    """Transcribe the audio recorded since the last pass, cut at the quietest moment of its last 3 s
+    (so words aren't split), and add its lines with timestamps from the meeting's start."""
+    import subprocess, numpy as np, soundfile as sf
+    wav = os.path.join(folder, "audio.wav")
+    try: size = os.path.getsize(wav)
+    except OSError: return
+    end = size - (size - WAV_HEADER) % 2
+    if end - LIVE["offset"] < 8 * 32000: return              # wait for at least 8 s of new audio
+    with open(wav, "rb") as f:
+        f.seek(LIVE["offset"]); raw = f.read(end - LIVE["offset"])
+    x = np.frombuffer(raw, dtype="<i2")
+    final_chunk = not MEETING["on"]
+    cut = len(x)
+    if not final_chunk and len(x) > 4 * 16000:
+        tail = x[-3 * 16000:].astype(np.float32)
+        win = 1600                                              # 0.1 s windows
+        e = [float(np.mean(tail[i:i + win] ** 2)) for i in range(0, len(tail) - win, win)]
+        cut = len(x) - 3 * 16000 + int(np.argmin(e)) * win + win // 2
+    x = x[:cut]
+    t0 = (LIVE["offset"] - WAV_HEADER) // 32                     # ms into the meeting
+    chunk = os.path.join(folder, "live-chunk.wav")
+    try:
+        sf.write(chunk, x, 16000, subtype="PCM_16")
+        out = subprocess.run(["nice", "-n", "10", STT_CLI, "transcribe", chunk, "--format", "json", "--speaker-detection", "on",
+                              "--engine", "parakeet", "--no-history", "--database", LIVE_DB],
+                             capture_output=True, text=True, timeout=300).stdout
+        d = json.loads(out or "{}")
+    except Exception as e:
+        print("meeting board: pass failed:", repr(e), flush=True); return
+    finally:
+        try: os.remove(chunk)
+        except OSError: pass
+    if d.get("ok") is False:
+        print("meeting board: pass failed:", d.get("error", "")[:200], flush=True); return
+    if LIVE["folder"] != folder or LIVE["final"]: return         # a newer meeting, or the final transcript won
+    segs = d.get("transcriptSegments") or []
+    if not segs and (d.get("rawTranscript") or "").strip():
+        segs = [{"startMs": 0, "endMs": len(x) // 16, "text": d["rawTranscript"]}]
+    for g in segs:
+        t = (g.get("text") or "").strip()
+        if t:
+            LIVE["segs"].append({"start": t0 + g.get("startMs", 0), "end": t0 + g.get("endMs", 0),
+                                 "speaker": g.get("speakerLabel") or "Speaker", "text": t})
+    LIVE["offset"] += cut * 2
+    try: json.dump({"segs": LIVE["segs"], "offset": LIVE["offset"]}, open(os.path.join(folder, "live.json"), "w"))
+    except OSError: pass
+
+def meeting_live():
+    stt_warm.wait(180)
+    while True:
+        time.sleep(LIVE_EVERY)
+        if time.time() - LIVE["seen"] < 10 and MEETING["on"] and LIVE["folder"] == MEETING["folder"] and not LIVE["final"]:
+            live_pass(LIVE["folder"])
 
 WATCH = {"beat": time.time()}
 
@@ -936,6 +1020,7 @@ def watchdog():
 threading.Thread(target=command_watch, daemon=True).start()
 threading.Thread(target=watchdog, daemon=True).start()
 threading.Thread(target=meeting_recover, daemon=True).start()
+threading.Thread(target=meeting_live, daemon=True).start()
 threading.Thread(target=auto_listen, daemon=True).start()
 print("kitten server ready on", PORT, MODEL_NAME, flush=True)
 ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()

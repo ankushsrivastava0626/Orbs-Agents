@@ -16,6 +16,6 @@ with sf.SoundFile(out, "w", samplerate=16000, channels=1, subtype="PCM_16") as f
         n = 0
         while not stop.wait(1):
             n += 1
-            if n % 30 == 0:
-                with lock: f.flush()                       # every 30 s, so a crash loses little
+            if n % 5 == 0:
+                with lock: f.flush()                       # every 5 s: a crash loses little, and the live board can read it
 print("saved", out, flush=True)
