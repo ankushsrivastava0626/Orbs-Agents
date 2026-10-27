@@ -28,6 +28,7 @@ final class TaskBoardModel: ObservableObject {
     var onRecord: () -> Void = {}
     var onAsk: () -> Void = {}
     var onClear: () -> Void = {}
+    var onNew: () -> Void = {}
 }
 
 struct TaskBoardView: View {
@@ -87,6 +88,9 @@ struct TaskBoardView: View {
                 if !m.v.original.isEmpty && !m.v.recording && !m.v.transcribing {
                     editButton("original")
                     if m.editing != "original" { iconButton("trash", "Start over", m.onClear) }
+                }
+                if !(m.v.original.isEmpty && m.v.ai.isEmpty) && !m.v.recording && !m.v.transcribing {
+                    iconButton("plus", "New card (this one is kept)", m.onNew)
                 }
                 if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show Mercury's version") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = true } }
                 iconButton("xmark", "Close the task board", m.onClose)
@@ -254,14 +258,15 @@ final class TaskBoard: NSObject, NSWindowDelegate {
 
     func restore() { if enabled { start() } }
 
-    /// Hold `: the board comes up and records until you let go; it stays open with what you said.
+    /// Hold `: the board comes up on a fresh card and records until you let go; it stays open with what you said.
     func hold(_ down: Bool) {
         if down {
             if !m.editing.isEmpty { m.onSaveEdit() }
             if !enabled { UserDefaults.standard.set(true, forKey: Self.enabledKey); start() } else if !m.shown { show() }
-            m.flipped = false
+            m.flipped = false; m.prompt = TaskBoardModel.defaultPrompt
+            if !m.v.transcribing { m.v.original = ""; m.v.ai = "" }   // a fresh card; the old one is kept
             m.v.recording = true; m.v.ready = false; m.v.started = Date().timeIntervalSince1970
-            post("/task/record", "start")
+            post("/task/record", "new")
         } else {
             m.v.recording = false
             post("/task/record", "stop")
@@ -310,6 +315,13 @@ final class TaskBoard: NSObject, NSWindowDelegate {
             URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
                 DispatchQueue.main.async { self?.apply(data) }
             }.resume()
+        }
+        m.onNew = { [weak self] in
+            guard let self else { return }
+            if !self.m.editing.isEmpty { self.m.onSaveEdit() }
+            self.m.flipped = false; self.m.prompt = TaskBoardModel.defaultPrompt
+            self.m.v.original = ""; self.m.v.ai = ""
+            self.post("/task/new")
         }
         m.onClear = { [weak self] in
             self?.m.flipped = false

@@ -359,13 +359,14 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps(task_view()).encode()); return
-        if self.path in ("/task/record", "/task/ask", "/task/clear"):   # task board: record / reshape with Mercury / start over
+        if self.path in ("/task/record", "/task/ask", "/task/clear", "/task/new"):   # task board: record / reshape with Mercury / start over
             try: v = (json.loads(body or "{}").get("text") or "").strip()
             except Exception: v = ""
             if self.path == "/task/record":           # "start" / "stop" (hold `), or toggle
-                want = {"start": True, "stop": False}.get(v, not TASK["recording"])
-                (task_start if want else task_stop)()
+                want = {"start": True, "new": True, "stop": False}.get(v, not TASK["recording"])
+                task_start(new=v == "new") if want else task_stop()   # "new" (hold `): a fresh card each time
             elif self.path == "/task/clear": task_clear()
+            elif self.path == "/task/new": task_new()   # the + button
             else: task_ask(v)
             self._ok(json.dumps(task_view()).encode()); return
         if self.path in ("/meeting/prompt", "/meeting/ask"):   # meeting board: the prompt for each line / one question
@@ -1229,12 +1230,13 @@ def task_load():
     try: TASK.update(json.load(open(TASK_FILE)))
     except Exception: pass
 
-def task_start():
+def task_start(new=False):
     import subprocess
     if TASK["recording"]: return
     for _ in range(100):                        # the last one is still being written down: queue behind it
         if not TASK["transcribing"]: break
         time.sleep(0.1)
+    if new: task_new()
     folder = os.path.join(TASKS, time.strftime("%Y-%m-%d %H-%M-%S"))
     os.makedirs(folder, exist_ok=True)
     proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
@@ -1314,6 +1316,16 @@ def task_ask(prompt):
         TASK.update(ai=out, busy=False)
         task_save()
     threading.Thread(target=run, daemon=True).start()
+
+def task_new():
+    """A fresh card. The old one is kept in tasks/saved/, never thrown away."""
+    if TASK["recording"] or TASK["transcribing"]: return
+    if TASK["original"].strip() or TASK["ai"].strip():
+        saved = os.path.join(TASKS, "saved"); os.makedirs(saved, exist_ok=True)
+        json.dump({k: TASK[k] for k in ("original", "ai", "prompt")},
+                  open(os.path.join(saved, time.strftime("%Y-%m-%d %H-%M-%S") + ".json"), "w"), indent=1)
+    TASK.update(original="", ai="", prompt="", live="")
+    task_save()
 
 def task_clear():
     if TASK["recording"] or TASK["transcribing"]: return
