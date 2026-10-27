@@ -1305,8 +1305,8 @@ def task_ask(prompt):
             out = openrouter([
                 {"role": "system", "content": "The user spoke some text out loud (often a list of tasks); it was transcribed "
                     "automatically, so fix obvious transcription slips. Rewrite it following the user's instruction. Keep "
-                    "every item they said unless told otherwise; don't invent new ones. Output only the result as clean "
-                    "plain text (lists as lines starting with '- ', short headings allowed), no preamble."},
+                    "every item they said unless told otherwise; don't invent new ones. Format it however you think "
+                    "reads best. Output only the result, no preamble."},
                 {"role": "user", "content": "What I said:\n" + TASK["original"] + "\n\nInstruction: " + prompt}])
             if not out: out = "Mercury came back empty. Try the prompt again."
         except Exception as e:
