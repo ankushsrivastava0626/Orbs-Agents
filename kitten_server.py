@@ -350,24 +350,10 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps({"muted": STATUS["muted_sessions"]}).encode()); return
-        if self.path == "/task/edit":           # your own edits: {"original": ...} or {"ai": ...}
-            try:
-                ev = json.loads(body or "{}")
-                for k in ("original", "ai"):
-                    if isinstance(ev.get(k), str): TASK[k] = ev[k].strip()
-                task_save()
-            except Exception:
-                pass
-            self._ok(json.dumps(task_view()).encode()); return
-        if self.path in ("/task/record", "/task/ask", "/task/clear", "/task/new"):   # task board: record / reshape with Mercury / start over
-            try: v = (json.loads(body or "{}").get("text") or "").strip()
-            except Exception: v = ""
-            if self.path == "/task/record":           # "start" / "stop" (hold `), or toggle
-                want = {"start": True, "new": True, "stop": False}.get(v, not TASK["recording"])
-                task_start(new=v == "new") if want else task_stop()   # "new" (hold `): a fresh card each time
-            elif self.path == "/task/clear": task_clear()
-            elif self.path == "/task/new": task_new()   # the + button
-            else: task_ask(v)
+        if self.path.startswith("/task/"):       # task boards: record / new / ask Mercury / edit / delete / hide / show all
+            try: ev = json.loads(body or "{}")
+            except Exception: ev = {}
+            task_post(self.path, ev)
             self._ok(json.dumps(task_view()).encode()); return
         if self.path in ("/meeting/prompt", "/meeting/ask"):   # meeting board: the prompt for each line / one question
             try: v = (json.loads(body or "{}").get("text") or "").strip()
@@ -1211,40 +1197,78 @@ def meeting_live():
         if time.time() - LIVE["seen"] < 10 and MEETING["on"] and LIVE["folder"] == MEETING["folder"] and not LIVE["final"]:
             live_pass(LIVE["folder"])
 
-# ---- Task board: say a list (or anything), see it written down, then have Mercury reshape it ----
+# ---- Task boards: say a list (or anything), see it written down, then have Mercury reshape it.
+# Several cards can be on screen; each is its own board. One records at a time (there's one mic).
 TASKS = os.path.join(DIR, "tasks")
-TASK_FILE = os.path.join(TASKS, "current.json")      # what's on the board (survives restarts)
-TASK = {"recording": False, "started": 0, "pid": None, "folder": "", "live": "", "transcribing": False,
-        "original": "", "ai": "", "prompt": "", "busy": False}
+CARDS_FILE = os.path.join(TASKS, "cards.json")       # every card (survives restarts)
+TASK = {"recording": False, "started": 0, "pid": None, "folder": "", "card": "", "live": "", "transcribing": False}
+CARDS = []                                            # [{id, original, ai, prompt, busy, hidden}], oldest first
+
+def card(cid):
+    return next((c for c in CARDS if c["id"] == cid), None)
 
 def task_view():
-    v = {k: TASK[k] for k in ("recording", "started", "live", "transcribing", "original", "ai", "prompt", "busy")}
-    v["ready"] = TASK["recording"] and os.path.exists(os.path.join(TASK["folder"], "mic.json"))   # the mic is really on
-    return v
+    rec = {k: TASK[k] for k in ("recording", "started", "live", "transcribing", "card")}
+    rec["ready"] = TASK["recording"] and os.path.exists(os.path.join(TASK["folder"], "mic.json"))   # the mic is really on
+    return {"rec": rec, "cards": CARDS}
 
 def task_save():
     os.makedirs(TASKS, exist_ok=True)
-    json.dump({k: TASK[k] for k in ("original", "ai", "prompt")}, open(TASK_FILE, "w"))
+    json.dump([{k: c[k] for k in ("id", "original", "ai", "prompt", "hidden")} for c in CARDS], open(CARDS_FILE, "w"), indent=1)
 
 def task_load():
-    try: TASK.update(json.load(open(TASK_FILE)))
-    except Exception: pass
+    try:
+        CARDS[:] = [dict(c, busy=False) for c in json.load(open(CARDS_FILE))]
+    except Exception:
+        old = os.path.join(TASKS, "current.json")      # the single board from before
+        try:
+            c = json.load(open(old))
+            if c.get("original") or c.get("ai"): CARDS.append(card_new(c.get("original", ""), c.get("ai", ""), c.get("prompt", ""), save=False))
+            os.rename(old, old + ".bak")
+        except Exception:
+            pass
+        task_save()
+    saved = os.path.join(TASKS, "saved")             # cards set aside by the old single board's +: back as boards
+    for f in sorted(os.listdir(saved)) if os.path.isdir(saved) else []:
+        try:
+            c = json.load(open(os.path.join(saved, f)))
+            CARDS.insert(0, card_new(c.get("original", ""), c.get("ai", ""), c.get("prompt", ""), save=False))
+            os.rename(os.path.join(saved, f), os.path.join(saved, f + ".imported"))
+        except Exception:
+            pass
+    task_save()
 
-def task_start(new=False):
+def card_new(original="", ai="", prompt="", save=True):
+    c = {"id": time.strftime("%Y%m%d-%H%M%S-") + os.urandom(2).hex(), "original": original, "ai": ai,
+         "prompt": prompt, "busy": False, "hidden": False}
+    if save: CARDS.append(c); task_save()
+    return c
+
+def card_delete(cid):
+    c = card(cid)
+    if not c or (TASK["card"] == cid and (TASK["recording"] or TASK["transcribing"])): return
+    CARDS.remove(c)
+    if c["original"].strip() or c["ai"].strip():       # a copy, just in case
+        d = os.path.join(TASKS, "deleted"); os.makedirs(d, exist_ok=True)
+        json.dump(c, open(os.path.join(d, cid + ".json"), "w"), indent=1)
+    task_save()
+
+def task_start(cid="", new=False):
     import subprocess
     if TASK["recording"]: return
     for _ in range(100):                        # the last one is still being written down: queue behind it
         if not TASK["transcribing"]: break
         time.sleep(0.1)
-    if new: task_new()
+    c = card_new() if new or not card(cid) else card(cid)
+    c["hidden"] = False
     folder = os.path.join(TASKS, time.strftime("%Y-%m-%d %H-%M-%S"))
     os.makedirs(folder, exist_ok=True)
     proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
                             stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
                             start_new_session=True)
-    TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, live="", proc=proc)
+    TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, card=c["id"], live="", proc=proc)
     threading.Thread(target=task_live, args=(folder,), daemon=True).start()
-    print("task board: recording to", folder, flush=True)
+    print("task board: recording to", folder, "for card", c["id"], flush=True)
 
 def task_snapshot(folder):
     """What's been said so far: a copy of the recording with its header fixed, transcribed."""
@@ -1268,7 +1292,7 @@ def task_live(folder):
 
 def task_stop():
     if not TASK["recording"]: return
-    pid, folder = TASK["pid"], TASK["folder"]
+    pid, folder, cid = TASK["pid"], TASK["folder"], TASK["card"]
     TASK.update(recording=False, transcribing=True)
     def finish():
         try: os.kill(pid, signal.SIGTERM)
@@ -1287,8 +1311,9 @@ def task_stop():
             text = transcribe(wav)
         finally:
             TASK.update(transcribing=False, live="")
-        if text:                                    # a second recording adds to what's already there
-            TASK["original"] = (TASK["original"].rstrip() + "\n\n" + text).strip() if TASK["original"] else text
+        c = card(cid)
+        if text and c:                              # a second recording on a card adds to it
+            c["original"] = (c["original"].rstrip() + "\n\n" + text).strip() if c["original"] else text
             open(os.path.join(folder, "original.txt"), "w").write(text)
             try: os.unlink(wav)                     # the words are kept; the audio isn't needed
             except OSError: pass
@@ -1298,10 +1323,11 @@ def task_stop():
         print("task board: transcribed", len(text), "chars", flush=True)
     threading.Thread(target=finish, daemon=True).start()
 
-def task_ask(prompt):
+def task_ask(cid, prompt):
     """Reshape what you said, with your instruction. Always from your original words, never from the last result."""
-    if not TASK["original"].strip() or not prompt or TASK["busy"]: return
-    TASK.update(busy=True, prompt=prompt)
+    c = card(cid)
+    if not c or not c["original"].strip() or not prompt or c["busy"]: return
+    c.update(busy=True, prompt=prompt)
     def run():
         try:
             out = openrouter([
@@ -1309,28 +1335,33 @@ def task_ask(prompt):
                     "automatically, so fix obvious transcription slips. Rewrite it following the user's instruction. Keep "
                     "every item they said unless told otherwise; don't invent new ones. Format it however you think "
                     "reads best. Output only the result, no preamble."},
-                {"role": "user", "content": "What I said:\n" + TASK["original"] + "\n\nInstruction: " + prompt}])
+                {"role": "user", "content": "What I said:\n" + c["original"] + "\n\nInstruction: " + prompt}])
             if not out: out = "Mercury came back empty. Try the prompt again."
         except Exception as e:
             out = "Couldn't reach Mercury: " + str(e)[:150]
-        TASK.update(ai=out, busy=False)
+        c.update(ai=out, busy=False)
         task_save()
     threading.Thread(target=run, daemon=True).start()
 
-def task_new():
-    """A fresh card. The old one is kept in tasks/saved/, never thrown away."""
-    if TASK["recording"] or TASK["transcribing"]: return
-    if TASK["original"].strip() or TASK["ai"].strip():
-        saved = os.path.join(TASKS, "saved"); os.makedirs(saved, exist_ok=True)
-        json.dump({k: TASK[k] for k in ("original", "ai", "prompt")},
-                  open(os.path.join(saved, time.strftime("%Y-%m-%d %H-%M-%S") + ".json"), "w"), indent=1)
-    TASK.update(original="", ai="", prompt="", live="")
-    task_save()
-
-def task_clear():
-    if TASK["recording"] or TASK["transcribing"]: return
-    TASK.update(original="", ai="", prompt="", live="")
-    task_save()
+def task_post(path, ev):
+    """POST /task/<action> {"id", "text", "original", "ai"}"""
+    act, cid, v = path.rsplit("/", 1)[-1], ev.get("id") or "", (ev.get("text") or "").strip()
+    c = card(cid)
+    if act == "record":                          # "start" (this card) / "new" (hold `: a fresh card) / "stop"
+        if v == "stop" or (v not in ("start", "new") and TASK["recording"]): task_stop()
+        else: task_start(cid, new=v == "new")
+    elif act == "new": card_new()                # the + button
+    elif act == "ask": task_ask(cid, v)
+    elif act == "delete": card_delete(cid)
+    elif act == "hide" and c: c["hidden"] = True; task_save()
+    elif act == "showall":                        # the pet's menu: every card back on screen
+        for x in CARDS: x["hidden"] = False
+        if not CARDS: card_new()
+        task_save()
+    elif act == "edit" and c:
+        for k in ("original", "ai"):
+            if isinstance(ev.get(k), str): c[k] = ev[k].strip()
+        task_save()
 
 task_load()
 

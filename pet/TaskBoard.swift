@@ -1,14 +1,21 @@
 // Task board: a card you talk to. Hit record, say your tasks (or anything); your words appear as you speak.
 // Then tell Mercury what to do with them ("lab work at the top, personal at the bottom", "make it concise")
 // and the card flips to its version. Flip back to see what you actually said and try a different prompt —
-// every prompt starts from your own words, never from the last result. Turned on from any orb's menu.
+// every prompt starts from your own words, never from the last result. Each card is its own board on screen:
+// + or holding ` opens another; ✕ only hides one (the pet's "Task board" menu item brings them all back);
+// the trash deletes that card.
 import AppKit
 import SwiftUI
 
-struct TaskView: Decodable, Equatable {
+struct TaskView: Equatable {
     var recording = false, ready = false, started = 0.0, transcribing = false, busy = false
+    var otherRecording = false                  // another card has the mic
     var live = "", original = "", ai = "", prompt = ""
 }
+
+struct ServerCard: Decodable { let id: String; let original: String; let ai: String; let prompt: String; let busy: Bool; let hidden: Bool }
+struct ServerRec: Decodable { let recording: Bool; let ready: Bool; let started: Double; let live: String; let transcribing: Bool; let card: String }
+struct ServerTasks: Decodable { let rec: ServerRec; let cards: [ServerCard] }
 
 final class TaskBoardModel: ObservableObject {
     @Published var v = TaskView()
@@ -27,7 +34,7 @@ final class TaskBoardModel: ObservableObject {
     var onClose: () -> Void = {}
     var onRecord: () -> Void = {}
     var onAsk: () -> Void = {}
-    var onClear: () -> Void = {}
+    var onDelete: () -> Void = {}
     var onNew: () -> Void = {}
 }
 
@@ -85,15 +92,13 @@ struct TaskBoardView: View {
                 Text(status).font(.system(size: 10, weight: .semibold, design: .rounded))
                     .foregroundColor(.white.opacity(0.55)).monospacedDigit().lineLimit(1)
                 Spacer()
-                if !m.v.original.isEmpty && !m.v.recording && !m.v.transcribing {
-                    editButton("original")
-                    if m.editing != "original" { iconButton("trash", "Start over", m.onClear) }
+                if !m.v.original.isEmpty && !m.v.recording && !m.v.transcribing { editButton("original") }
+                if !m.v.recording && !m.v.transcribing && m.editing.isEmpty {
+                    iconButton("trash", "Delete this card", m.onDelete)
                 }
-                if !(m.v.original.isEmpty && m.v.ai.isEmpty) && !m.v.recording && !m.v.transcribing {
-                    iconButton("plus", "New card (this one is kept)", m.onNew)
-                }
+                iconButton("plus", "New card (this one stays)", m.onNew)
                 if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show Mercury's version") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = true } }
-                iconButton("xmark", "Close the task board", m.onClose)
+                iconButton("xmark", "Hide (the pet's Task board menu brings it back)", m.onClose)
             }
             .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
 
@@ -123,7 +128,8 @@ struct TaskBoardView: View {
                         .frame(width: 28, height: 28)
                         .background(Circle().fill(m.v.recording && m.v.ready ? Color.red.opacity(0.85) : Color.white.opacity(0.1)))
                 }
-                .buttonStyle(.plain).disabled(m.v.transcribing)
+                .buttonStyle(.plain).disabled(m.v.transcribing || m.v.otherRecording)
+                .opacity(m.v.otherRecording ? 0.35 : 1)
                 .help(m.v.recording ? "Stop recording" : (m.v.original.isEmpty ? "Record" : "Record more (adds to it)"))
 
                 HStack(spacing: 6) {                                         // what Mercury should do with it
@@ -164,7 +170,7 @@ struct TaskBoardView: View {
                     NSPasteboard.general.clearContents(); NSPasteboard.general.setString(m.v.ai, forType: .string)
                 }
                 iconButton("arrow.triangle.2.circlepath", "Back to what you said (write a new prompt there)") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = false }
-                iconButton("xmark", "Close the task board", m.onClose)
+                iconButton("xmark", "Hide (the pet's Task board menu brings it back)", m.onClose)
             }
             .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
 
@@ -248,96 +254,28 @@ struct TaskBoardView: View {
     }
 }
 
-final class TaskBoard: NSObject, NSWindowDelegate {
-    let m = TaskBoardModel()
-    private var panel: CanvasPanel?
+/// Every card on screen: polls the voice server and keeps one window per card in step with it.
+final class TaskBoard: NSObject {
+    private var boards: [String: TaskCardWindow] = [:]
     private var timer: Timer?
-    private var sawBusy = false                  // the server picked up the prompt (ignores polls sent before it)
-    private static let enabledKey = "taskBoardEnabled", frameKey = "taskBoardFrame"
-    var enabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
+    var enabled: Bool { boards.values.contains { $0.m.shown } }   // the menu's checkmark
 
-    func restore() { if enabled { start() } }
-
-    /// Hold `: the board comes up on a fresh card and records until you let go; it stays open with what you said.
-    func hold(_ down: Bool) {
-        if down {
-            if !m.editing.isEmpty { m.onSaveEdit() }
-            if !enabled { UserDefaults.standard.set(true, forKey: Self.enabledKey); start() } else if !m.shown { show() }
-            m.flipped = false; m.prompt = TaskBoardModel.defaultPrompt
-            if !m.v.transcribing { m.v.original = ""; m.v.ai = "" }   // a fresh card; the old one is kept
-            m.v.recording = true; m.v.ready = false; m.v.started = Date().timeIntervalSince1970
-            post("/task/record", "new")
-        } else {
-            m.v.recording = false
-            post("/task/record", "stop")
-        }
-    }
-    func toggle() {
-        if enabled { stop() } else { UserDefaults.standard.set(true, forKey: Self.enabledKey); start() }
-    }
-
-    private func stop() {
-        UserDefaults.standard.set(false, forKey: Self.enabledKey)
-        if m.v.recording { post("/task/record", "stop") }                // closing mid-recording keeps what was said
-        timer?.invalidate(); timer = nil
-        m.shown = false
-        let p = panel
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-            if self?.m.shown == false { p?.orderOut(nil) }
-        }
-    }
-
-    private func start() {
-        m.onClose = { [weak self] in self?.stop() }
-        m.onRecord = { [weak self] in
-            guard let self else { return }
-            if !self.m.editing.isEmpty { self.m.onSaveEdit() }       // keep your edit, then record more
-            self.m.flipped = false
-            self.m.v.recording.toggle()                          // feels instant; the next poll confirms
-            if self.m.v.recording { self.m.v.started = Date().timeIntervalSince1970 }
-            self.post("/task/record", self.m.v.recording ? "start" : "stop")
-        }
-        m.onAsk = { [weak self] in
-            guard let self else { return }
-            let q = self.m.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !q.isEmpty, !self.m.v.original.isEmpty, !self.m.v.busy else { return }
-            self.m.sent = true; self.sawBusy = false; self.m.v.busy = true; self.m.prompt = ""
-            self.post("/task/ask", q)
-        }
-        m.onSaveEdit = { [weak self] in
-            guard let self else { return }
-            let side = self.m.editing, text = self.m.draft
-            self.m.editing = ""
-            if side == "ai" { self.m.v.ai = text } else { self.m.v.original = text }   // show it now; the server confirms
-            var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/task/edit")!)
-            req.httpMethod = "POST"; req.timeoutInterval = 3
-            req.httpBody = try? JSONSerialization.data(withJSONObject: [side: text])
-            URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-                DispatchQueue.main.async { self?.apply(data) }
-            }.resume()
-        }
-        m.onNew = { [weak self] in
-            guard let self else { return }
-            if !self.m.editing.isEmpty { self.m.onSaveEdit() }
-            self.m.flipped = false; self.m.prompt = TaskBoardModel.defaultPrompt
-            self.m.v.original = ""; self.m.v.ai = ""
-            self.post("/task/new")
-        }
-        m.onClear = { [weak self] in
-            self?.m.flipped = false
-            self?.m.prompt = TaskBoardModel.defaultPrompt          // fresh start: the default is ready again
-            self?.post("/task/clear")
-        }
-        show()
+    func restore() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.poll() }
         poll()
     }
 
-    private func post(_ path: String, _ text: String = "") {
+    /// The pet's menu: every card back on screen (a new empty one if there are none).
+    func toggle() { post("/task/showall") }
+
+    /// Hold `: a fresh card comes up and records until you let go; it stays open with what you said.
+    func hold(_ down: Bool) { post("/task/record", ["text": down ? "new" : "stop"]) }
+
+    func post(_ path: String, _ body: [String: String] = [:]) {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123" + path)!)
-        req.httpMethod = "POST"; req.timeoutInterval = 3
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
+        req.httpMethod = "POST"; req.timeoutInterval = 12
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
             DispatchQueue.main.async { self?.apply(data) }
         }.resume()
@@ -352,16 +290,90 @@ final class TaskBoard: NSObject, NSWindowDelegate {
     }
 
     private func apply(_ data: Data?) {
-        guard let data, let v = try? JSONDecoder().decode(TaskView.self, from: data) else { return }
+        guard let data, let t = try? JSONDecoder().decode(ServerTasks.self, from: data) else { return }
+        let ids = Set(t.cards.map(\.id))
+        for (id, b) in boards where !ids.contains(id) { b.close(); boards[id] = nil }   // deleted
+        for c in t.cards {
+            let mine = t.rec.card == c.id
+            var v = TaskView()
+            v.original = c.original; v.ai = c.ai; v.prompt = c.prompt; v.busy = c.busy
+            v.recording = mine && t.rec.recording; v.ready = mine && t.rec.ready; v.started = t.rec.started
+            v.transcribing = mine && t.rec.transcribing; v.live = mine ? t.rec.live : ""
+            v.otherRecording = t.rec.recording && !mine
+            if c.hidden { boards[c.id]?.hide(); continue }
+            let b = boards[c.id] ?? {
+                let b = TaskCardWindow(id: c.id, board: self, place: boards.count)
+                boards[c.id] = b
+                return b
+            }()
+            b.update(v)
+            if !b.m.shown { b.show() }
+        }
+    }
+}
+
+/// One card's window.
+final class TaskCardWindow: NSObject, NSWindowDelegate {
+    let id: String
+    let m = TaskBoardModel()
+    private weak var board: TaskBoard?
+    private var panel: CanvasPanel?
+    private var sawBusy = false                  // the server picked up the prompt (ignores polls sent before it)
+    private let place: Int                       // where a brand-new card goes: stepped off the others
+    private var frameKey: String { "taskCardFrame." + id }
+
+    init(id: String, board: TaskBoard, place: Int) {
+        self.id = id; self.board = board; self.place = place
+        super.init()
+        m.onClose = { [weak self] in
+            guard let self else { return }
+            if self.m.v.recording { self.post("/task/record", ["text": "stop"]) }   // keeps what was said
+            self.hide(); self.post("/task/hide")
+        }
+        m.onDelete = { [weak self] in self?.post("/task/delete") }
+        m.onNew = { [weak self] in
+            if let self, !self.m.editing.isEmpty { self.m.onSaveEdit() }
+            self?.post("/task/new")
+        }
+        m.onRecord = { [weak self] in
+            guard let self else { return }
+            if !self.m.editing.isEmpty { self.m.onSaveEdit() }       // keep your edit, then record more
+            self.m.flipped = false
+            self.m.v.recording.toggle()                          // feels instant; the next poll confirms
+            if self.m.v.recording { self.m.v.started = Date().timeIntervalSince1970 }
+            self.post("/task/record", ["text": self.m.v.recording ? "start" : "stop"])
+        }
+        m.onAsk = { [weak self] in
+            guard let self else { return }
+            let q = self.m.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !q.isEmpty, !self.m.v.original.isEmpty, !self.m.v.busy else { return }
+            self.m.sent = true; self.sawBusy = false; self.m.v.busy = true; self.m.prompt = ""
+            self.post("/task/ask", ["text": q])
+        }
+        m.onSaveEdit = { [weak self] in
+            guard let self else { return }
+            let side = self.m.editing, text = self.m.draft
+            self.m.editing = ""
+            if side == "ai" { self.m.v.ai = text } else { self.m.v.original = text }   // show it now; the server confirms
+            self.post("/task/edit", [side: text])
+        }
+    }
+
+    private func post(_ path: String, _ body: [String: String] = [:]) {
+        board?.post(path, body.merging(["id": id]) { a, _ in a })
+    }
+
+    func update(_ v: TaskView) {
         if m.sent && v.busy { sawBusy = true }
         if m.sent && sawBusy && !v.busy {                            // Mercury answered: flip to its version
             m.sent = false; sawBusy = false; m.flipped = !v.ai.isEmpty
         }
         if v.ai.isEmpty && m.flipped { m.flipped = false }
+        if v.recording && m.flipped { m.flipped = false }            // recording shows your words
         if v != m.v { m.v = v }
     }
 
-    private func show() {
+    func show() {
         if panel == nil {
             let p = CanvasPanel(contentRect: .zero, styleMask: [.borderless, .resizable, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
@@ -372,22 +384,40 @@ final class TaskBoard: NSObject, NSWindowDelegate {
             p.minSize = NSSize(width: 260, height: 160)
             p.contentView = NSHostingView(rootView: TaskBoardView(m: m))
             p.delegate = self
-            var r = UserDefaults.standard.string(forKey: Self.frameKey).map(NSRectFromString) ?? .zero
-            if r.width < 100 {                                      // first time: left of where the meeting board goes
+            var r = UserDefaults.standard.string(forKey: frameKey).map(NSRectFromString) ?? .zero
+            if r.width < 100 {                                      // a new card: stepped down-left of the others
                 let s = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
-                r = NSRect(x: s.maxX - 380 - 16 - 400, y: s.maxY - 400 - 60, width: 360, height: 400)
+                let step = CGFloat(place % 8) * 28
+                r = NSRect(x: s.maxX - 380 - 16 - 400 - step, y: s.maxY - 400 - 60 - step, width: 360, height: 400)
             }
             p.setFrame(r, display: true)
             panel = p
+            remember()
         }
         panel?.orderFrontRegardless()
         m.shown = true
+    }
+
+    func hide() {
+        guard m.shown else { return }
+        m.shown = false
+        let p = panel
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            if self?.m.shown == false { p?.orderOut(nil) }
+        }
+    }
+
+    func close() {
+        hide()
+        UserDefaults.standard.removeObject(forKey: frameKey)
+        let p = panel
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { p?.close() }
     }
 
     func windowDidMove(_ n: Notification) { remember() }
     func windowDidEndLiveResize(_ n: Notification) { remember() }
     private func remember() {
         guard let p = panel else { return }
-        UserDefaults.standard.set(NSStringFromRect(p.frame), forKey: Self.frameKey)
+        UserDefaults.standard.set(NSStringFromRect(p.frame), forKey: frameKey)
     }
 }

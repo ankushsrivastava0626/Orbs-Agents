@@ -1145,7 +1145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item("Focus timer", #selector(menuPomodoro), on: !pomodoro.hidden)
         item(model.s.meeting ? "Stop recording meeting (right Option ×2)" : "Record meeting (right Option ×2)", #selector(menuMeeting))
         item("Meeting board (live transcript)", #selector(menuMeetingBoard), on: meetingBoard.enabled)
-        item("Task board (say it, then reshape it)", #selector(menuTaskBoard), on: taskBoard.enabled)
+        item("Task boards (show all)", #selector(menuTaskBoard), on: taskBoard.enabled)
         item("Record Mac audio in meetings", #selector(menuMacAudio), on: systemAudio.enabled)
         item("Open meetings folder", #selector(menuOpenMeetings))
         item("Tunnel vision (Esc to exit)", #selector(menuTunnel), on: !tunnelPanels.isEmpty)
