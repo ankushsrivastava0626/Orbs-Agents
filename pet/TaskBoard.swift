@@ -179,21 +179,40 @@ struct TaskBoardView: View {
         }
     }
 
+    /// Mercury's plain text as a list: # topics, ## subtopics, and bullets nested by their indentation.
     @ViewBuilder private func aiLine(_ raw: String) -> some View {
-        let line = raw.trimmingCharacters(in: .whitespaces)
+        let lead = raw.prefix { $0 == " " || $0 == "\t" }
+        let depth = min(4, lead.reduce(0) { $0 + ($1 == "\t" ? 2 : 1) } / 2)
+        let line = raw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "**", with: "")
+        let number = line.range(of: #"^\d+[.)] "#, options: .regularExpression)
         if line.isEmpty {
             Color.clear.frame(height: 4)
-        } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") {
+        } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") || number != nil {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Circle().fill(Color.white.opacity(0.35)).frame(width: 4, height: 4).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 4 }
-                bodyText(String(line.dropFirst(2)), opacity: 0.92)
+                if let n = number {
+                    Text(line[n].trimmingCharacters(in: .whitespaces)).font(.system(size: depth == 0 ? 12 : 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white.opacity(0.4)).monospacedDigit()
+                } else if depth == 0 {
+                    Circle().fill(Color.white.opacity(0.35)).frame(width: 4, height: 4).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 4 }
+                } else {
+                    Circle().stroke(Color.white.opacity(0.3), lineWidth: 1).frame(width: 4, height: 4).alignmentGuide(.firstTextBaseline) { $0[.bottom] + 4 }
+                }
+                Text(number.map { String(line[$0.upperBound...]) } ?? String(line.dropFirst(2)))
+                    .font(.system(size: depth == 0 ? 13 : 12, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(depth == 0 ? 0.92 : 0.75)).lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        } else if line.hasPrefix("#") || (line.hasSuffix(":") && line.count < 40) {
+            .padding(.leading, CGFloat(depth) * 16)
+        } else if line.hasPrefix("##") {                                    // subtopic
+            Text(line.trimmingCharacters(in: CharacterSet(charactersIn: "#: ")))
+                .font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundColor(.white.opacity(0.7))
+                .padding(.top, 4).padding(.leading, CGFloat(depth) * 16)
+        } else if line.hasPrefix("#") || (line.hasSuffix(":") && line.count < 40) {   // topic
             Text(line.trimmingCharacters(in: CharacterSet(charactersIn: "#: ")))
                 .font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.white.opacity(0.5))
-                .textCase(.uppercase).padding(.top, 6)
+                .textCase(.uppercase).padding(.top, 8)
         } else {
-            bodyText(line.replacingOccurrences(of: "**", with: ""), opacity: 0.92)
+            bodyText(line, opacity: 0.92).padding(.leading, CGFloat(depth) * 16)
         }
     }
 
