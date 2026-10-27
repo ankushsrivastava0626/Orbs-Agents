@@ -21,9 +21,10 @@ def config():
             cfg[k.strip()] = v.strip().strip('"')
     return cfg
 
-from kittenml import KittenTTS
+os.environ.setdefault("HF_HUB_OFFLINE", "1")   # Kitten/Kokoro weights are already in the HF cache
 MODEL_NAME = config().get("KITTEN_MODEL", "KittenML/kitten-tts-nano-0.8-int8")
-model = KittenTTS(MODEL_NAME)
+model = None                                    # local voices load in the background so the server is up at once
+models_ready = threading.Event()
 
 import numpy as np
 import sounddevice as sd
@@ -51,6 +52,7 @@ def trim(a, thresh=0.01, pad=0.04):
     return a[max(0, idx[0] - p): idx[-1] + p]
 
 def synth(text, cfg):
+    models_ready.wait()
     return trim(np.asarray(model.generate(text, voice=cfg.get("KITTEN_VOICE", "Jasper"),
                 speed=float(cfg.get("KITTEN_SPEED", "1.0")), clean_text=True), dtype=np.float32))
 
@@ -68,15 +70,29 @@ def abort_all():
     p = tts_player
     if p: p.stop()
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")   # Kokoro weights + af_heart are already in the HF cache
-from kokoro import KPipeline
 from gemini_voice import Player
 import gemini_voice
 gemini_voice.LEVEL_CB = lambda v: STATUS.__setitem__("out_level", v)
-kokoro_pipes = {"a": KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")}
+kokoro_pipes = {}
+
+def load_models():
+    global model, KPipeline
+    t = time.time()
+    try:
+        from kittenml import KittenTTS
+        model = KittenTTS(MODEL_NAME)
+        from kokoro import KPipeline as K
+        KPipeline = K
+        kokoro_pipes["a"] = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+    finally:
+        models_ready.set()
+        print(f"local voices loaded ({time.time() - t:.1f}s)", flush=True)
+
+threading.Thread(target=load_models, daemon=True).start()
 
 def kokoro_pipe(voice):
     """Voice prefix picks the accent: a* American, b* British. Pipelines share one model."""
+    models_ready.wait()
     lang = voice[0] if voice[:1] in ("a", "b") else "a"
     if lang not in kokoro_pipes:
         kokoro_pipes[lang] = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M", model=kokoro_pipes["a"].model)
@@ -773,10 +789,15 @@ def warm_stt():
     import tempfile, soundfile as sf
     f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
     sf.write(f.name, np.zeros(16000, dtype=np.float32), 16000)
-    t = time.time(); transcribe(f.name)
-    try: os.unlink(f.name)
-    except OSError: pass
+    t = time.time()
+    try: transcribe(f.name)
+    finally:
+        stt_warm.set()
+        try: os.unlink(f.name)
+        except OSError: pass
     print(f"stt: warm ({time.time() - t:.1f}s)", flush=True)
+
+stt_warm = threading.Event()
 
 threading.Thread(target=warm_stt, daemon=True).start()
 
@@ -843,6 +864,7 @@ def meeting_recover():
     elif a:
         try: os.unlink(ACTIVE)
         except OSError: pass
+    stt_warm.wait(180)                                # your first voice command isn't stuck behind a meeting
     for d in sorted(os.listdir(MEETINGS)) if os.path.isdir(MEETINGS) else []:
         f = os.path.join(MEETINGS, d)
         wav = os.path.join(f, "audio.wav")
@@ -862,7 +884,7 @@ def meeting_transcribe(folder, wav):
     t = time.time()
     try:
         with meeting_lock:
-            out = subprocess.run([STT_CLI, "transcribe", wav, "--format", "json", "--speaker-detection", "on",
+            out = subprocess.run(["nice", "-n", "15", STT_CLI, "transcribe", wav, "--format", "json", "--speaker-detection", "on",
                                   "--engine", "parakeet", "--no-history", "--database", MEETING_DB],
                                  capture_output=True, text=True, timeout=3 * 3600).stdout
         d = json.loads(out)
