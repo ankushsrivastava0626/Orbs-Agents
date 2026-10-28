@@ -213,6 +213,34 @@ def speak_kokoro(text, cfg, my_gen):
             return False
     return False
 
+LAST_SAID = os.path.join(DIR, "last_said.json")
+try: STATUS["last_said"].update(json.load(open(LAST_SAID)))
+except Exception: pass
+
+def seed_last_said():
+    """Orbs with nothing remembered (e.g. before this was saved): their last spoken line, from their transcript."""
+    import glob
+    try: orbs = json.load(open(os.path.join(DIR, "orbs.json")))
+    except Exception: return
+    for o in orbs:
+        name, sid = o.get("name"), o.get("id")
+        if o.get("kind") != "claude" or not sid or name in STATUS["last_said"]: continue
+        files = glob.glob(os.path.expanduser("~/.claude*/projects/*/" + sid + ".jsonl"))
+        if not files: continue
+        text, at = "", 0
+        for raw in open(files[0], errors="ignore"):
+            if '"speak"' not in raw and "speak" not in raw: continue
+            try: e = json.loads(raw)
+            except Exception: continue
+            for b in (e.get("message") or {}).get("content") or []:
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name", "").endswith("speak"):
+                    t = (b.get("input") or {}).get("text", "")
+                    if t: text, at = t, os.path.getmtime(files[0])
+        if text:
+            STATUS["last_said"][name] = {"id": f"s{at:.3f}", "session": name, "text": text, "at": at}
+
+seed_last_said()
+
 def worker():
     while True:
         my_gen, text, kind, who = jobs.get()
@@ -222,6 +250,8 @@ def worker():
         if kind == "SAY":                                     # remember each orb's last reply (hover shows it)
             STATUS["last_said"][who or "voice"] = {"id": f"s{time.time():.3f}", "session": who or "voice",
                                                    "text": text, "at": time.time()}
+            try: json.dump(STATUS["last_said"], open(LAST_SAID, "w"))   # kept through server restarts
+            except OSError: pass
         if kind == "SAY" and (who or "voice") in STATUS["muted_sessions"]:
             # muted orb: show the reply as text instead of speaking it
             STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",

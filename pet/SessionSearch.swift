@@ -17,6 +17,7 @@ final class SessionSearchModel: ObservableObject {
     @Published var selected = 0
     @Published var shown = false
     @Published var searching = false
+    @Published var stale = false                // the results shown are for an older search
     var openIds: Set<String> = []                   // conversations already showing as an orb
     var onPick: ((SearchHit) -> Void)?
     var onClose: (() -> Void)?
@@ -41,7 +42,12 @@ struct SessionSearchView: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 13)
             Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
-            if m.hits.isEmpty {
+            if m.searching && m.hits.isEmpty || m.searching && m.hits.isEmpty == false && m.stale {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small).colorScheme(.dark)
+                    Text("Searching…").font(.system(size: 12, design: .rounded)).foregroundColor(.white.opacity(0.5))
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if m.hits.isEmpty {
                 Text(m.query.isEmpty ? "No conversations yet" : "Nothing matches")
                     .font(.system(size: 12, design: .rounded)).foregroundColor(.white.opacity(0.4))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -161,16 +167,16 @@ final class SessionSearch {
     /// Debounced: the script runs off the main thread; only the newest answer is shown.
     private func search(_ q: String) {
         pending?.cancel()
+        m.searching = true; m.stale = true               // say so right away, not after the pause
         seq += 1
         let mine = seq
         let w = DispatchWorkItem { [weak self] in
             guard let self, let run = self.runSearch else { return }
-            DispatchQueue.main.async { self.m.searching = true }
             DispatchQueue.global(qos: .userInitiated).async {
                 let hits = run(q)
                 DispatchQueue.main.async {
                     guard mine == self.seq else { return }
-                    self.m.searching = false
+                    self.m.searching = false; self.m.stale = false
                     self.m.hits = hits; self.m.selected = 0
                 }
             }
