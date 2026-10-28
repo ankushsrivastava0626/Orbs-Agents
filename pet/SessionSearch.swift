@@ -31,7 +31,7 @@ struct SessionSearchView: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass").font(.system(size: 14, weight: .semibold)).foregroundColor(.white.opacity(0.5))
-                TextField("Search every orb conversation…", text: $m.query)
+                TextField("Search titles, folders and everything said…", text: $m.query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 15, design: .rounded))
                     .foregroundColor(.white)
@@ -76,7 +76,14 @@ struct SessionSearchView: View {
         .onChange(of: m.shown) { on in if on { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true } } }
     }
 
+    /// A real button: a click opens that row whether or not it's the highlighted one.
     func row(_ h: SearchHit, _ i: Int) -> some View {
+        Button { pick(i) } label: { rowBody(h, i) }
+            .buttonStyle(.plain)
+            .onHover { if $0 { m.selected = i } }
+    }
+
+    func rowBody(_ h: SearchHit, _ i: Int) -> some View {
         let sel = i == m.selected
         let folder = URL(fileURLWithPath: h.cwd).lastPathComponent
         let when = Date(timeIntervalSince1970: h.when)
@@ -106,8 +113,6 @@ struct SessionSearchView: View {
         .padding(.horizontal, 10).padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(sel ? 0.12 : 0.001)))
         .contentShape(Rectangle())
-        .onHover { if $0 { m.selected = i } }
-        .onTapGesture { pick(i) }
     }
 
     func pick(_ i: Int) {

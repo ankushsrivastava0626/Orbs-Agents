@@ -148,14 +148,23 @@ def main():
             c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd}
         fresh[f] = c
         if not c["text"].strip(): continue                    # never actually talked to it
-        low = c["text"].lower()
-        if names.get(s["id"]): low = names[s["id"]].lower() + "\n" + low      # its name is searchable too
-        if words and not all(w in low for w in words): continue
         cwd = c.get("cwd") or s["cwd"]
-        if c.get("title"): low = c["title"].lower() + "\n" + low
         title = names.get(s["id"]) or c.get("title") or c["first"][:80] or s["name"] or os.path.basename(cwd.rstrip("/"))
+        # what's searched: the title, the folder path, and everything said — titles and folders count most
+        head = (title + " " + (c.get("title") or "") + " " + (names.get(s["id"]) or "")).lower()
+        folder = cwd.lower()
+        body = c["text"].lower()
+        pats = [re.compile(r"(?<![a-z0-9])" + re.escape(w)) for w in words]   # words start at a word boundary
+        def has(p, t): return p.search(t) is not None
+        if words and not all(has(p, head) or has(p, folder) or has(p, body) for p in pats): continue
+        phrase = re.compile(r"(?<![a-z0-9])" + r"[\s_-]*".join(map(re.escape, words))) if len(words) > 1 else None
+        score = 0
+        for p in pats:
+            score += 60 * has(p, head) + 40 * has(p, folder) + 10 * has(p, c["first"].lower()) + min(len(p.findall(body)), 20)
+        if phrase and (has(phrase, head) or has(phrase, folder)): score += 150      # the exact phrase in title/folder
+        elif phrase and has(phrase, body): score += 30
         results.append({"kind": s["kind"], "id": s["id"], "cwd": cwd, "title": title, "name": s["name"], "when": m,
-                        "snippet": snippet(c["text"], words), "hits": sum(low.count(w) for w in words),
+                        "snippet": snippet(c["text"], words), "hits": score,
                         "command": s["command"]})
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     try:
