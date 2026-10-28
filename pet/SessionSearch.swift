@@ -14,7 +14,7 @@ struct SearchHit: Decodable, Identifiable, Equatable {
 final class SessionSearchModel: ObservableObject {
     @Published var query = ""
     @Published var hits: [SearchHit] = []
-    @Published var selected = 0
+    @Published var selectedId: String? = nil   // the highlighted session (by id, so a list refresh can't move it)
     @Published var shown = false
     @Published var searching = false
     @Published var stale = false                // the results shown are for an older search
@@ -37,7 +37,7 @@ struct SessionSearchView: View {
                     .font(.system(size: 15, design: .rounded))
                     .foregroundColor(.white)
                     .focused($focused)
-                    .onSubmit { pick(m.selected) }
+                    .onSubmit { pick(m.hits.first { $0.id == m.selectedId } ?? m.hits.first) }
                 if m.searching { ProgressView().controlSize(.small).colorScheme(.dark) }
             }
             .padding(.horizontal, 16).padding(.vertical, 13)
@@ -55,12 +55,10 @@ struct SessionSearchView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 2) {
-                            ForEach(Array(m.hits.enumerated()), id: \.element.id) { i, h in
-                                row(h, i).id(i)
-                            }
+                            ForEach(m.hits) { h in row(h).id(h.id) }   // each row is its session, never a position
                         }.padding(6)
                     }
-                    .onChange(of: m.selected) { i in withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(i) } }
+                    .onChange(of: m.selectedId) { id in if let id { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) } } }
                 }
             }
         }
@@ -76,21 +74,22 @@ struct SessionSearchView: View {
         .onExitCommand { m.onClose?() }
         .onMoveCommand { d in
             guard !m.hits.isEmpty else { return }
-            if d == .down { m.selected = min(m.selected + 1, m.hits.count - 1) }
-            if d == .up { m.selected = max(m.selected - 1, 0) }
+            let i = m.hits.firstIndex { $0.id == m.selectedId } ?? 0
+            if d == .down { m.selectedId = m.hits[min(i + 1, m.hits.count - 1)].id }
+            if d == .up { m.selectedId = m.hits[max(i - 1, 0)].id }
         }
         .onChange(of: m.shown) { on in if on { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true } } }
     }
 
     /// A real button: a click opens that row whether or not it's the highlighted one.
-    func row(_ h: SearchHit, _ i: Int) -> some View {
-        Button { pick(i) } label: { rowBody(h, i) }
+    func row(_ h: SearchHit) -> some View {
+        Button { pick(h) } label: { rowBody(h) }                     // opens the session you clicked, itself
             .buttonStyle(.plain)
-            .onHover { if $0 { m.selected = i } }
+            .onHover { if $0 { m.selectedId = h.id } }
     }
 
-    func rowBody(_ h: SearchHit, _ i: Int) -> some View {
-        let sel = i == m.selected
+    func rowBody(_ h: SearchHit) -> some View {
+        let sel = h.id == m.selectedId
         let folder = URL(fileURLWithPath: h.cwd).lastPathComponent
         let when = Date(timeIntervalSince1970: h.when)
         return HStack(alignment: .top, spacing: 10) {
@@ -121,9 +120,8 @@ struct SessionSearchView: View {
         .contentShape(Rectangle())
     }
 
-    func pick(_ i: Int) {
-        guard m.hits.indices.contains(i) else { return }
-        m.onPick?(m.hits[i])
+    func pick(_ h: SearchHit?) {
+        if let h { m.onPick?(h) }
     }
 }
 
@@ -177,7 +175,9 @@ final class SessionSearch {
                 DispatchQueue.main.async {
                     guard mine == self.seq else { return }
                     self.m.searching = false; self.m.stale = false
-                    self.m.hits = hits; self.m.selected = 0
+                    let keep = hits.contains { $0.id == self.m.selectedId }
+                    self.m.hits = hits
+                    if !keep { self.m.selectedId = hits.first?.id }
                 }
             }
         }
