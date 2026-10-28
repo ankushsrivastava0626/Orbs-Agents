@@ -355,6 +355,10 @@ class H(BaseHTTPRequestHandler):
             except Exception: ev = {}
             task_post(self.path, ev)
             self._ok(json.dumps(task_view()).encode()); return
+        if self.path == "/meeting/open":      # pet's Previous meetings menu: {"text": folder}
+            try: f = json.loads(body or "{}").get("text") or ""
+            except Exception: f = ""
+            self._ok(json.dumps({"ok": meeting_open(f)}).encode()); return
         if self.path in ("/meeting/prompt", "/meeting/ask"):   # meeting board: the prompt for each line / one question
             try: v = (json.loads(body or "{}").get("text") or "").strip()
             except Exception: v = ""
@@ -1021,6 +1025,7 @@ def meeting_transcribe(folder, wav):
         if LIVE["folder"] == folder and LIVE["ai"]:          # keep what the prompt said, next to the transcript
             open(os.path.join(folder, "prompt-replies.txt"), "w").write("\n\n".join(
                 f"[{_ts(x['at'])}] {x['speaker']}: {x['said']}\n  → {x['reply']}" for x in LIVE["ai"]) + "\n")
+            json.dump(LIVE["ai"], open(os.path.join(folder, "prompt-replies.json"), "w"))   # so the board can show them again
         try: os.remove(os.path.join(folder, "live.json"))
         except OSError: pass
         STATUS.update(meeting_done=folder, meeting_done_at=time.time())
@@ -1043,6 +1048,32 @@ def live_load(folder):
         LIVE.update(segs=d.get("segs", []), offset=d.get("offset", WAV_HEADER), ai=d.get("ai", []))
     except Exception:
         pass
+
+def prompt_replies_txt(path):
+    """Older meetings kept the replies only as text: "[mm:ss] Speaker N: said" then "  → reply"."""
+    out = []
+    try: blocks = open(path).read().strip().split("\n\n")
+    except OSError: return out
+    for b in blocks:
+        m = re.match(r"\[(?:(\d+):)?(\d+):(\d+)\] ([^:]+): (.*?)\n  → (.*)", b, re.S)
+        if not m: continue
+        h, mi, se = int(m.group(1) or 0), int(m.group(2)), int(m.group(3))
+        out.append({"at": ((h * 60 + mi) * 60 + se) * 1000 + 1, "speaker": m.group(4), "said": m.group(5).strip(),
+                    "reply": m.group(6).strip(), "prompt": ""})
+    return out
+
+def meeting_open(folder):
+    """Put a finished meeting back on the board: its transcript, the prompt's replies, and Ask works on it."""
+    folder = os.path.realpath(folder)
+    if MEETING["on"] or not folder.startswith(os.path.realpath(MEETINGS) + os.sep): return False
+    try: d = json.load(open(os.path.join(folder, "transcript.json")))
+    except Exception: return False
+    try: ai = json.load(open(os.path.join(folder, "prompt-replies.json")))
+    except Exception: ai = prompt_replies_txt(os.path.join(folder, "prompt-replies.txt"))
+    LIVE.update(folder=folder, final=True, ai=ai, ask={"q": "", "a": "", "busy": False},
+                segs=[{"start": g.get("startMs", 0), "end": g.get("endMs", 0), "speaker": g.get("speakerLabel") or "Speaker",
+                       "text": g.get("text", "").strip()} for g in d.get("transcriptSegments") or []])
+    return True
 
 def meeting_live_view():
     return {"recording": MEETING["on"], "started": MEETING.get("started", 0),

@@ -230,6 +230,37 @@ final class MeetingBoard: NSObject, NSWindowDelegate {
     var enabled: Bool { UserDefaults.standard.bool(forKey: Self.enabledKey) }
 
     func restore() { if enabled { start(showNow: false) } }
+
+    /// Previous meetings menu: that meeting's transcript back on the board (Ask works on it too).
+    func openPast(_ folder: String) {
+        if !enabled { UserDefaults.standard.set(true, forKey: Self.enabledKey); start(showNow: true) } else { show() }
+        dismissedFolder = ""
+        m.question = ""
+        post("/meeting/open", folder)
+    }
+
+    /// Finished meetings, newest first: (folder, "Oct 28, 10:36 · 2 speakers · 34:10").
+    static func pastMeetings(limit: Int = 20) -> [(String, String)] {
+        let root = NSHomeDirectory() + "/.claude/voice/meetings"
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).filter { $0.hasPrefix("20") }.sorted(by: >)
+        let inF = DateFormatter(); inF.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        let outF = DateFormatter(); outF.dateFormat = "MMM d, h:mm a"
+        var out: [(String, String)] = []
+        for n in names where out.count < limit {
+            let f = root + "/" + n
+            guard FileManager.default.fileExists(atPath: f + "/transcript.json") else { continue }
+            var label = inF.date(from: n).map(outF.string) ?? n
+            if let h = FileHandle(forReadingAtPath: f + "/transcript.txt") {         // its 2nd line: speakers · length
+                let head = String(decoding: h.readData(ofLength: 200), as: UTF8.self).components(separatedBy: "\n")
+                try? h.close()
+                if head.count > 1 {
+                    label += " · " + head[1].replacingOccurrences(of: "speaker(s)", with: "speakers").replacingOccurrences(of: " long", with: "")
+                }
+            }
+            out.append((f, label))
+        }
+        return out
+    }
     func toggle() {
         if enabled {
             UserDefaults.standard.set(false, forKey: Self.enabledKey)

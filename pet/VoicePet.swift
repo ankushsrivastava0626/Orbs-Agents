@@ -835,6 +835,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let systemAudio = SystemAudio()
     @objc func menuMacAudio() { systemAudio.toggle() }
     @objc func menuMeetingBoard() { meetingBoard.toggle() }
+    @objc func menuOpenPastMeeting(_ i: NSMenuItem) { if let f = i.representedObject as? String { meetingBoard.openPast(f) } }
     let taskBoard = TaskBoard()
     @objc func menuTaskBoard() { taskBoard.toggle() }
     @objc func menuResetPeek() { taskBoard.resetPeekLayout() }
@@ -1149,6 +1150,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item("Focus timer", #selector(menuPomodoro), on: !pomodoro.hidden)
         item(model.s.meeting ? "Stop recording meeting (right Option ×2)" : "Record meeting (right Option ×2)", #selector(menuMeeting))
         item("Meeting board (live transcript)", #selector(menuMeetingBoard), on: meetingBoard.enabled)
+        let past = NSMenuItem(title: "Previous meetings", action: nil, keyEquivalent: "")
+        let pastMenu = NSMenu()
+        let meetings = MeetingBoard.pastMeetings()
+        for (folder, label) in meetings {
+            let i = NSMenuItem(title: label, action: #selector(menuOpenPastMeeting(_:)), keyEquivalent: "")
+            i.target = self; i.representedObject = folder
+            i.isEnabled = !model.s.meeting                                   // not while one is recording
+            pastMenu.addItem(i)
+        }
+        if meetings.isEmpty { pastMenu.addItem(NSMenuItem(title: "No finished meetings yet", action: nil, keyEquivalent: "")) }
+        past.submenu = pastMenu
+        menu.addItem(past)
         item("Task boards (show all)", #selector(menuTaskBoard), on: taskBoard.enabled)
         item("Reset task quick-look layout", #selector(menuResetPeek), on: false)
         item("Record Mac audio in meetings", #selector(menuMacAudio), on: systemAudio.enabled)
