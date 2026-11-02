@@ -49,7 +49,9 @@ def claude_text(path):
             for s in blocks(msg.get("content")):
                 s = s.strip()
                 if s and not s.startswith("<"):
-                    lines.append("You: " + s); first = first or s
+                    lines.append("You: " + s)
+                    if not first and not s.startswith("This session is being continued"):
+                        first = next((l.strip() for l in s.splitlines() if l.strip()), "")   # its first line
         elif t == "assistant":
             for b in msg.get("content") or []:
                 if not isinstance(b, dict): continue
@@ -146,10 +148,10 @@ def main():
         f = s["file"]
         m = os.path.getmtime(f)
         c = cache.get(f)
-        if not c or c.get("m") != m or "orb" not in c:
+        if not c or c.get("m") != m or c.get("v") != 2:
             if s["kind"] == "claude": first, text, ctitle, cwd, orb = claude_text(f)
             else: (first, text), ctitle, cwd, orb = codex_text(f), "", s["cwd"], True
-            c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd, "orb": orb}
+            c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd, "orb": orb, "v": 2}
         fresh[f] = c
         if not (c["orb"] or s["id"] in launched): continue           # never an orb's: started straight from claude
         if not c["text"].strip(): continue                    # never actually talked to it
