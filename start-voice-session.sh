@@ -43,8 +43,12 @@ else
 fi
 # remember the current session, and keep a list of voice sessions for "Resume"
 /usr/bin/python3 - "$V" "$ID" "$CWD" "$NAME" "$CMD" <<'PY'
-import json, os, sys, time
+import fcntl, json, os, sys, time
 v, sid, cwd, name, cmd = sys.argv[1:6]
+# two orbs starting at once must not write over each other: one at a time, and each file swapped in whole
+lock = open(os.path.join(v, ".launch.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
+def save(path, data):
+    json.dump(data, open(path + ".tmp", "w"), indent=1); os.replace(path + ".tmp", path)
 if name == "voice":
     json.dump({"id": sid, "cwd": cwd, "started": time.time()}, open(os.path.join(v, "session.json"), "w"))
 # orbs.json: one entry per orb/session, read by the pet
@@ -61,12 +65,12 @@ if cmd:
 i = next((k for k, o in enumerate(orbs) if o.get("name") == name), None)
 if i is None: orbs.append(entry)                            # new orb goes at the end
 else: orbs[i] = entry                                       # relaunch/resume: keep its place in the dock
-json.dump(orbs, open(op, "w"), indent=1)
+save(op, orbs)
 p = os.path.join(v, "sessions.json")
 try: lst = json.load(open(p))
 except Exception: lst = []
 lst = [s for s in lst if s["id"] != sid] + [{"id": sid, "cwd": cwd, "started": time.time()}]
-json.dump(lst[-50:], open(p, "w"), indent=1)
+save(p, lst[-500:])
 PY
 $TMUX_BIN kill-session -t "$NAME" 2>/dev/null
 if [ -z "$CMD" ]; then

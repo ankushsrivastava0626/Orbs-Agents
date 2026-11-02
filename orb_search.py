@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Keyword search over every conversation on this Mac: every Claude Code session (all config folders —
-~/.claude, ~/.claude-mercury, ~/.claude-openrouter, …) and every Codex orb conversation.
+"""Keyword search over every conversation an orb has had: Claude orb sessions in any config folder (~/.claude,
+~/.claude-mercury, ~/.claude-openrouter, …) and the Codex orb conversations. Sessions started straight from
+claude or codex (never an orb) are left out.
   orb_search.py [words…]   -> JSON list, best/newest first:
      [{kind, id, cwd, title, when, snippet, hits, command}]
 Every word must appear (case-insensitive). No words: every session, newest first.
@@ -36,12 +37,13 @@ def blocks(c):
 
 
 def claude_text(path):
-    lines, first, title, cwd = [], "", "", ""
+    lines, first, title, cwd, orb = [], "", "", "", False
     for raw in open(path, errors="ignore"):
         try: e = json.loads(raw)
         except Exception: continue
         t, msg = e.get("type"), e.get("message") or {}
         cwd = cwd or e.get("cwd") or ""
+        if t == "agent-name" and re.fullmatch(r"voice(-\d+)?", e.get("agentName") or ""): orb = True   # the launcher's name
         if t == "custom-title": title = e.get("customTitle") or title          # the name it was given
         elif t == "user" and not e.get("isMeta"):
             for s in blocks(msg.get("content")):
@@ -54,11 +56,12 @@ def claude_text(path):
                 if b.get("type") == "text" and b.get("text", "").strip():
                     lines.append(b["text"].strip())
                 elif b.get("type") == "tool_use" and b.get("name", "").endswith("speak"):
+                    orb = orb or b.get("name") == "mcp__voice__speak"           # talked through an orb's voice
                     s = (b.get("input") or {}).get("text", "")
                     if s: lines.append(s)
     text = "\n".join(lines)
     if len(text) > 400_000: text = text[:200_000] + "\n…\n" + text[-200_000:]   # keeps the index small
-    return first, text, title, cwd
+    return first, text, title, cwd, orb
 
 
 def spoken(code):
@@ -138,18 +141,21 @@ def main():
     names = load(os.path.join(V, "orb_names.json"), {})
     fresh = {}
     results = []
+    launched = {x.get("id") for x in load(os.path.join(V, "sessions.json"), []) + load(os.path.join(V, "orbs.json"), [])}
     for s in sessions():
         f = s["file"]
         m = os.path.getmtime(f)
         c = cache.get(f)
-        if not c or c.get("m") != m or "cwd" not in c:
-            if s["kind"] == "claude": first, text, ctitle, cwd = claude_text(f)
-            else: (first, text), ctitle, cwd = codex_text(f), "", s["cwd"]
-            c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd}
+        if not c or c.get("m") != m or "orb" not in c:
+            if s["kind"] == "claude": first, text, ctitle, cwd, orb = claude_text(f)
+            else: (first, text), ctitle, cwd, orb = codex_text(f), "", s["cwd"], True
+            c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd, "orb": orb}
         fresh[f] = c
+        if not (c["orb"] or s["id"] in launched): continue           # never an orb's: started straight from claude
         if not c["text"].strip(): continue                    # never actually talked to it
         cwd = c.get("cwd") or s["cwd"]
-        title = names.get(s["id"]) or c.get("title") or c["first"][:80] or s["name"] or os.path.basename(cwd.rstrip("/"))
+        named = c.get("title") if not re.fullmatch(r"voice(-\d+)?", c.get("title") or "") else ""   # "voice-3" is just the orb
+        title = names.get(s["id"]) or named or c["first"][:80] or s["name"] or os.path.basename(cwd.rstrip("/"))
         # what's searched: the title, the folder path, and everything said — titles and folders count most
         head = (title + " " + (c.get("title") or "") + " " + (names.get(s["id"]) or "")).lower()
         folder = cwd.lower()
