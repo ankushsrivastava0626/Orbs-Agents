@@ -32,10 +32,38 @@ if [ -z "$RESUME" ] && [ "$FRESH" = 0 ]; then
 fi
 if [ -n "$RESUME" ]; then
   ID="$RESUME"
-  C=$(/usr/bin/python3 -c 'import json,sys
+  # Resume exactly this conversation: its transcript says which command (config folder) and which folder it
+  # belongs to. Claude treats an ID it can't find as a search term and opens a different one, so never guess.
+  FIX="$(/usr/bin/python3 - "$ID" "$CMD" <<'PY'
+import glob, json, os, sys
+sid, cmd = sys.argv[1:3]
+f = next(iter(glob.glob(os.path.expanduser("~/.claude*/projects/*/" + sid + ".jsonl"))), "")
+if not f: sys.exit()
+cfg = os.path.basename(f.split("/projects/")[0])                  # .claude / .claude-openrouter / …
+want = "" if cfg == ".claude" else cfg.lstrip(".")
+have = os.path.basename(cmd.split()[0]) if cmd.strip() else ""
+if have in ("", "claude"): have = ""
+if want != have: cmd = want                                      # the orb's old command can't open it
+cwd = ""
+for raw in open(f, errors="ignore"):
+    if '"cwd"' in raw:
+        try: cwd = json.loads(raw).get("cwd") or ""
+        except Exception: continue
+        if cwd: break
+print(json.dumps({"cmd": cmd, "cwd": cwd}))
+PY
+)"
+  if [ -n "$FIX" ]; then
+    CMD="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["cmd"])' "$FIX")"
+    FC="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["cwd"])' "$FIX")"
+    [ -d "$FC" ] && CWD="$FC"
+  fi
+  if [ -z "$FIX" ]; then                        # no transcript found: fall back to what the launch list says
+    C=$(/usr/bin/python3 -c 'import json,sys
 for s in json.load(open(sys.argv[1])):
     if s["id"]==sys.argv[2]: print(s["cwd"])' "$V/sessions.json" "$ID" 2>/dev/null | head -1)
-  [ -d "$C" ] && CWD="$C"
+    [ -d "$C" ] && CWD="$C"
+  fi
   SESS="--resume $ID"
 else
   ID=$(/usr/bin/uuidgen | tr 'A-Z' 'a-z')
