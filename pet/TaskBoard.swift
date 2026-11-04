@@ -455,6 +455,7 @@ final class TaskBoard: NSObject {
             v.otherRecording = t.rec.recording && !mine
             let b = boards[c.id] ?? {
                 let b = TaskCardWindow(id: c.id, board: self, place: boards.count)
+                b.m.flipped = !c.ai.isEmpty && !v.recording          // first shown: Mercury's version, if it has one
                 boards[c.id] = b
                 return b
             }()
