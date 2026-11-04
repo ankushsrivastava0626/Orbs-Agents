@@ -37,7 +37,7 @@ def blocks(c):
 
 
 def claude_text(path):
-    lines, first, title, cwd, orb = [], "", "", "", False
+    lines, first, title, cwd, orb, models = [], "", "", "", False, {}
     for raw in open(path, errors="ignore"):
         try: e = json.loads(raw)
         except Exception: continue
@@ -53,6 +53,8 @@ def claude_text(path):
                     if not first and not s.startswith("This session is being continued"):
                         first = next((l.strip() for l in s.splitlines() if l.strip()), "")   # its first line
         elif t == "assistant":
+            md = msg.get("model") or ""
+            if md and md != "<synthetic>": models[md] = models.get(md, 0) + 1
             for b in msg.get("content") or []:
                 if not isinstance(b, dict): continue
                 if b.get("type") == "text" and b.get("text", "").strip():
@@ -63,7 +65,7 @@ def claude_text(path):
                     if s: lines.append(s)
     text = "\n".join(lines)
     if len(text) > 400_000: text = text[:200_000] + "\n…\n" + text[-200_000:]   # keeps the index small
-    return first, text, title, cwd, orb
+    return first, text, title, cwd, orb, top_model(models)
 
 
 def spoken(code):
@@ -75,12 +77,20 @@ def spoken(code):
     return out
 
 
+def top_model(counts):
+    """The model it mostly ran on; OpenRouter writes some as "anthropic/z-ai/glm-…": keep the real name."""
+    if not counts: return ""
+    m = max(counts, key=counts.get)
+    return m.split("/", 1)[1] if m.count("/") >= 2 else m
+
+
 def codex_text(path):
-    lines, first = [], ""
+    lines, first, models = [], "", {}
     for raw in open(path, errors="ignore"):
         try: e = json.loads(raw)
         except Exception: continue
         p = e.get("payload") or {}
+        if e.get("type") == "turn_context" and p.get("model"): models[p["model"]] = models.get(p["model"], 0) + 1
         if e.get("type") == "response_item" and p.get("type") == "custom_tool_call":
             lines += spoken(p.get("input") or "")
             continue
@@ -93,7 +103,7 @@ def codex_text(path):
                 lines.append("You: " + s); first = first or s
             else:
                 lines.append(s)
-    return first, "\n".join(lines)
+    return first, "\n".join(lines), top_model(models)
 
 
 def command_for(config_dir):
@@ -148,10 +158,10 @@ def main():
         f = s["file"]
         m = os.path.getmtime(f)
         c = cache.get(f)
-        if not c or c.get("m") != m or c.get("v") != 2:
-            if s["kind"] == "claude": first, text, ctitle, cwd, orb = claude_text(f)
-            else: (first, text), ctitle, cwd, orb = codex_text(f), "", s["cwd"], True
-            c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd, "orb": orb, "v": 2}
+        if not c or c.get("m") != m or c.get("v") != 3:
+            if s["kind"] == "claude": first, text, ctitle, cwd, orb, model = claude_text(f)
+            else: (first, text, model), ctitle, cwd, orb = codex_text(f), "", s["cwd"], True
+            c = {"m": m, "first": first, "text": text, "title": ctitle, "cwd": cwd, "orb": orb, "model": model, "v": 3}
         fresh[f] = c
         if not (c["orb"] or s["id"] in launched): continue           # never an orb's: started straight from claude
         if not c["text"].strip(): continue                    # never actually talked to it
@@ -173,7 +183,7 @@ def main():
         elif phrase and has(phrase, body): score += 30
         results.append({"kind": s["kind"], "id": s["id"], "cwd": cwd, "title": title, "name": s["name"], "when": m,
                         "snippet": snippet(c["text"], words), "hits": score,
-                        "command": s["command"]})
+                        "command": s["command"], "model": c.get("model") or ("codex" if s["kind"] == "codex" else "claude")})
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     try:
         json.dump(fresh, open(CACHE + ".tmp", "w")); os.replace(CACHE + ".tmp", CACHE)
