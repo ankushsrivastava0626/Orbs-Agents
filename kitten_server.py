@@ -1137,7 +1137,8 @@ def live_pass(folder):
     t0 = (LIVE["offset"] - WAV_HEADER) // 32                     # ms into the meeting
     chunk = os.path.join(folder, "live-chunk.wav")
     try:
-        sf.write(chunk, x, 16000, subtype="PCM_16")
+        pad = np.zeros(max(1, -(-len(x) // STT_PAD)) * STT_PAD, dtype=np.int16); pad[:len(x)] = x
+        sf.write(chunk, pad, 16000, subtype="PCM_16")            # whole minutes: reuses the compiled model
         out = subprocess.run(["nice", "-n", "10", STT_CLI, "transcribe", chunk, "--format", "json", "--speaker-detection", "on",
                               "--engine", "parakeet", "--no-history", "--database", LIVE_DB],
                              capture_output=True, text=True, timeout=300).stdout
