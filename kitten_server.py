@@ -84,10 +84,13 @@ def load_models():
         from kokoro import KPipeline as K
         KPipeline = K
         kokoro_pipes["a"] = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+        keep_resident.pin_weights(getattr(kokoro_pipes["a"], "model", None))   # Joe's voice stays in RAM
     finally:
         models_ready.set()
         print(f"local voices loaded ({time.time() - t:.1f}s)", flush=True)
 
+import keep_resident                             # speech-to-text model + program stay in RAM (8 GB Mac)
+keep_resident.start()
 threading.Thread(target=load_models, daemon=True).start()
 
 def kokoro_pipe(voice):
@@ -300,6 +303,7 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         if self.path == "/status":
+            STATUS["resident_mb"] = round(keep_resident.stats["files_mb"] + keep_resident.stats["weights_mb"])
             self._ok(json.dumps(STATUS).encode())
         elif self.path == "/task":           # the task board polls this
             self._ok(json.dumps(task_view()).encode())
@@ -614,6 +618,7 @@ def speech_seconds(path):
         if _gate_vad is None:
             from silero_vad import load_silero_vad
             _gate_vad = load_silero_vad()
+            keep_resident.pin_weights(_gate_vad)
         _gate_vad.reset_states()
         n, voiced = 512, 0
         for i in range(0, len(audio) - n + 1, n):
@@ -689,6 +694,7 @@ def auto_listen():
     import soundfile as sf
     from silero_vad import load_silero_vad
     vad = load_silero_vad()
+    keep_resident.pin_weights(vad)
     CH = 512                                   # 32 ms at 16 kHz (Silero's frame size)
     while True:
         if not STATUS["auto"] or STATUS["ptt"] or TASK["recording"]:   # task board recording: your words go there
