@@ -421,16 +421,37 @@ def trim_stt_db():
     except OSError:
         pass
 
+STT_PAD = 60 * 16000      # Core ML compiles Parakeet once per audio length (~27 s): every clip goes up to a whole minute
+
+def padded(path):
+    """A copy of the clip with silence added up to the next whole minute, so it always reuses the compiled model."""
+    import soundfile as sf, tempfile
+    a, sr = sf.read(path, dtype="int16")
+    if a.ndim > 1: a = a[:, 0]
+    if sr != 16000: return None                       # only our own 16 kHz recordings
+    n = max(1, -(-len(a) // STT_PAD)) * STT_PAD
+    b = np.zeros(n, dtype=np.int16); b[:len(a)] = a
+    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
+    sf.write(f.name, b, 16000, subtype="PCM_16")
+    return f.name
+
 def transcribe(path):
     import subprocess
     trim_stt_db()
     t = time.time()
+    try: pad = padded(path)
+    except Exception as e:
+        print("stt: couldn't pad:", repr(e)[:120], flush=True); pad = None
     try:
-        out = subprocess.run([STT_CLI, "transcribe", path, "--format", "json", "--speaker-detection", "off",
+        out = subprocess.run([STT_CLI, "transcribe", pad or path, "--format", "json", "--speaker-detection", "off",
                               "--engine", "parakeet", "--database", STT_DB],
                              capture_output=True, text=True, timeout=120).stdout
     except subprocess.TimeoutExpired:
         print("stt: timed out after 120 s", flush=True); return ""
+    finally:
+        if pad:
+            try: os.unlink(pad)
+            except OSError: pass
     if time.time() - t > 5: print(f"stt: slow transcription ({time.time() - t:.1f}s)", flush=True)
     try:
         return (json.loads(out).get("rawTranscript") or "").strip()
@@ -808,6 +829,8 @@ def warm_stt():
         stt_warm.set()
         try: os.unlink(f.name)
         except OSError: pass
+        try: keep_resident.pin_files()                # a fresh compile: pin it now, not in 10 min
+        except Exception: pass
     print(f"stt: warm ({time.time() - t:.1f}s)", flush=True)
 
 stt_warm = threading.Event()
