@@ -12,6 +12,7 @@ PROT_READ, MAP_SHARED, MAP_FAILED = 1, 1, ctypes.c_void_p(-1).value
 
 HOME = os.path.expanduser("~")
 STT_FILES = [HOME + "/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3",
+             # Core ML's compiled copy (the encoder alone is ~425 MB): if it's pushed out, the next command recompiles
              HOME + "/Library/Caches/com.macparakeet.MacParakeet/com.apple.e5rt.e5bundlecache"]
 # not the macparakeet-cli program itself: macOS kills a signed program at launch if another process has its file pinned
 pinned = {}                                     # path -> (address, size, mtime)
