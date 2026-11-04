@@ -1270,6 +1270,7 @@ def card(cid):
 
 def task_view():
     rec = {k: TASK[k] for k in ("recording", "started", "live", "transcribing", "card")}
+    rec["level_file"] = os.path.join(TASK["folder"], "level") if TASK["recording"] else ""   # the pet reads it for the wave
     rec["ready"] = TASK["recording"] and os.path.exists(os.path.join(TASK["folder"], "mic.json"))   # the mic is really on
     return {"rec": rec, "cards": CARDS}
 
@@ -1325,7 +1326,8 @@ def task_start(cid="", new=False):
     c["hidden"] = False
     folder = os.path.join(TASKS, time.strftime("%Y-%m-%d %H-%M-%S"))
     os.makedirs(folder, exist_ok=True)
-    proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
+    proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook"),
+                             os.path.join(folder, "level")],
                             stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
                             start_new_session=True)
     TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, card=c["id"], live="", proc=proc)
