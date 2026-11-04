@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Record the mic to a WAV until told to stop (SIGTERM/SIGINT). Its own process, so a restart of the
 voice server never cuts a meeting off. usage: meeting_rec.py <out.wav> [device-name-part]"""
-import os, signal, sys, threading, time
+import signal, sys, threading, time
 import sounddevice as sd, soundfile as sf
 
 out, want = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "MacBook").lower()
@@ -10,16 +10,8 @@ for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP): signal.signal(s, lambda
 dev = next((i for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0 and want in d["name"].lower()), None)
 with sf.SoundFile(out, "w", samplerate=16000, channels=1, subtype="PCM_16") as f:
     lock = threading.Lock()
-    level = sys.argv[3] if len(sys.argv) > 3 else ""      # optional: how loud right now, for the task board's wave
-    last = [0.0]
     def cb(d, frames, t, st):
         with lock: f.write(d.copy())
-        if level and time.time() - last[0] > 0.04:
-            last[0] = time.time()
-            try:
-                with open(level + ".tmp", "w") as lf: lf.write("%.4f" % float((d ** 2).mean() ** 0.5))
-                os.replace(level + ".tmp", level)
-            except OSError: pass
     with sd.InputStream(device=dev, samplerate=16000, channels=1, dtype="float32", callback=cb):
         import json, os, time                              # when the mic really started: Mac audio is lined up to it
         json.dump({"started": time.time()}, open(os.path.join(os.path.dirname(out), "mic.json"), "w"))

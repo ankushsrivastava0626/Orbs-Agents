@@ -15,10 +15,7 @@ struct TaskView: Equatable {
 }
 
 struct ServerCard: Decodable { let id: String; let original: String; let ai: String; let prompt: String; let busy: Bool; let hidden: Bool }
-struct ServerRec: Decodable {
-    let recording: Bool; let ready: Bool; let started: Double; let live: String; let transcribing: Bool; let card: String
-    let level_file: String?
-}
+struct ServerRec: Decodable { let recording: Bool; let ready: Bool; let started: Double; let live: String; let transcribing: Bool; let card: String }
 struct ServerTasks: Decodable { let rec: ServerRec; let cards: [ServerCard] }
 
 final class TaskBoardModel: ObservableObject {
@@ -294,7 +291,6 @@ struct TaskBoardView: View {
 /// Every card on screen: polls the voice server and keeps one window per card in step with it.
 final class TaskBoard: NSObject {
     private var boards: [String: TaskCardWindow] = [:]
-    private let wave = VoiceWave()               // the wave on the right edge while one records
     private var order: [String] = []             // oldest first, as the server keeps them
     private var hiddenIDs: Set<String> = []
     private var timer: Timer?
@@ -446,7 +442,6 @@ final class TaskBoard: NSObject {
 
     private func apply(_ data: Data?) {
         guard let data, let t = try? JSONDecoder().decode(ServerTasks.self, from: data) else { return }
-        wave.sync(levelFile: t.rec.recording && t.rec.ready ? (t.rec.level_file ?? "") : "")
         let ids = Set(t.cards.map(\.id))
         for (id, b) in boards where !ids.contains(id) { b.close(); boards[id] = nil }   // deleted
         order = t.cards.map(\.id)
