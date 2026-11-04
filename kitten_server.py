@@ -21,7 +21,7 @@ def config():
             cfg[k.strip()] = v.strip().strip('"')
     return cfg
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")   # Kitten/Kokoro weights are already in the HF cache
+os.environ.setdefault("HF_HUB_OFFLINE", "1")   # Kitten weights are already in the HF cache
 MODEL_NAME = config().get("KITTEN_MODEL", "KittenML/kitten-tts-nano-0.8-int8")
 model = None                                    # local voices load in the background so the server is up at once
 models_ready = threading.Event()
@@ -73,18 +73,12 @@ def abort_all():
 from gemini_voice import Player
 import gemini_voice
 gemini_voice.LEVEL_CB = lambda v: STATUS.__setitem__("out_level", v)
-kokoro_pipes = {}
-
 def load_models():
-    global model, KPipeline
+    global model
     t = time.time()
     try:
-        from kittenml import KittenTTS
+        from kittenml import KittenTTS                    # only for ENGINE=kitten; Joe speaks through Gemini
         model = KittenTTS(MODEL_NAME)
-        from kokoro import KPipeline as K
-        KPipeline = K
-        kokoro_pipes["a"] = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
-        keep_resident.pin_weights(getattr(kokoro_pipes["a"], "model", None))   # Joe's voice stays in RAM
     finally:
         models_ready.set()
         print(f"local voices loaded ({time.time() - t:.1f}s)", flush=True)
@@ -92,30 +86,6 @@ def load_models():
 import keep_resident                             # speech-to-text model + program stay in RAM (8 GB Mac)
 keep_resident.start()
 threading.Thread(target=load_models, daemon=True).start()
-
-def kokoro_pipe(voice):
-    """Voice prefix picks the accent: a* American, b* British. Pipelines share one model."""
-    models_ready.wait()
-    lang = voice[0] if voice[:1] in ("a", "b") else "a"
-    if lang not in kokoro_pipes:
-        kokoro_pipes[lang] = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M", model=kokoro_pipes["a"].model)
-    return kokoro_pipes[lang]
-
-def kokoro_say(text, cfg, still_current):
-    """Speak with Kokoro, streaming: each chunk plays as soon as it is generated."""
-    player = Player(1.0)
-    set_tts_player(player)
-    try:
-        voice = cfg.get("KOKORO_VOICE", "bm_george")
-        for _, _, audio in kokoro_pipe(voice)(text, voice=voice,
-                                  speed=float(cfg.get("KOKORO_SPEED", "1.2"))):
-            if not still_current() or player.stopped:
-                break
-            pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1, 1) * 32767).astype(np.int16).tobytes()
-            player.write(pcm)
-    finally:
-        set_tts_player(None)
-        player.close()
 
 gemini_blocked_until = 0.0
 
@@ -126,9 +96,9 @@ def note_gemini_error(e):
     global gemini_blocked_until
     STATUS["problem_at"] = time.time()
     msg = repr(e)
-    if any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "quota", "1011")):
-        gemini_blocked_until = time.time() + 1800     # quota hit: use Kokoro for 30 min, then retry
-        print("gemini quota exhausted; using Kokoro for 30 min", flush=True)
+    if any(k in msg for k in ("429", "RESOURCE_EXHAUSTED", "quota")):
+        gemini_blocked_until = time.time() + 600      # quota hit: replies show as text for 10 min, then retry
+        print("gemini quota exhausted; replies shown as text for 10 min", flush=True)
     else:
         print("gemini failed:", msg[:300], flush=True)
 
@@ -200,20 +170,8 @@ def speak_gemini(text, kind, cfg, my_gen):
         if is_audio_error(joe.last_error) and attempt == 1:
             refresh_audio(); continue
         if joe.last_error is not None and not is_audio_error(joe.last_error):
-            note_gemini_error(joe.last_error)          # quota etc.: Kokoro for a while
+            note_gemini_error(joe.last_error)          # quota etc.: replies show as text for a while
         return False
-    return False
-
-def speak_kokoro(text, cfg, my_gen):
-    for attempt in (1, 2):
-        try:
-            kokoro_say(text, cfg, lambda: my_gen == gen)
-            return True
-        except Exception as e:
-            print("kokoro failed:", repr(e)[:200], flush=True)
-            if is_audio_error(e) and attempt == 1:
-                refresh_audio(); continue
-            return False
     return False
 
 LAST_SAID = os.path.join(DIR, "last_said.json")
@@ -265,20 +223,17 @@ def worker():
         cfg = config()
         engine = cfg.get("ENGINE", "gemini")
         try:
-            if engine == "gemini" and gemini_ok():
-                STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
-                if speak_gemini(text, kind, cfg, my_gen):
-                    continue
-                STATUS["problem_at"] = time.time()     # amber dot: Gemini failed, using the fallback voice
-            if engine in ("gemini", "kokoro"):
-                if kind != "SAY":                    # hook-read replies/steps: keep them short without Joe
-                    text = " ".join(sentences(text)[:int(cfg.get("MAX_SENTENCES", "2"))])
-                if engine == "gemini":
-                    STATUS["problem_at"] = time.time()
-                STATUS.update(speaking=True, spoken=text)
-                if not speak_kokoro(text, cfg, my_gen):
-                    STATUS["problem_at"] = time.time()
-                    print("dropped line (no working voice):", text[:80], flush=True)
+            if engine != "kitten":                   # Joe is Gemini; there is no backup voice
+                if gemini_ok():
+                    STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
+                    if speak_gemini(text, kind, cfg, my_gen):
+                        continue
+                # Gemini failed: amber dot, and the reply shows as text on its orb so nothing is lost
+                STATUS["problem_at"] = time.time()
+                if kind == "SAY":
+                    STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
+                                                                  "text": text, "at": time.time()}])[-10:]
+                print("gemini unavailable; shown as text:", text[:80], flush=True)
                 continue
             # legacy Kitten engine
             clips = []
