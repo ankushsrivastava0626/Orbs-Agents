@@ -12,7 +12,7 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/us
 V="$HOME/.claude/voice"; TMUX_BIN=/opt/homebrew/bin/tmux
 CWD="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("cwd",""))' "$V/session.json" 2>/dev/null)"
 [ -d "$CWD" ] || CWD="/Users/kush/Githubs/persistent agent"
-RESUME=""; NAME="voice"; FRESH=0; CMD=""
+RESUME=""; NAME="voice"; FRESH=0; CMD=""; MODEL_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
@@ -44,19 +44,28 @@ want = "" if cfg == ".claude" else cfg.lstrip(".")
 have = os.path.basename(cmd.split()[0]) if cmd.strip() else ""
 if have in ("", "claude"): have = ""
 if want != have: cmd = want                                      # the orb's old command can't open it
-cwd = ""
+cwd, model = "", ""
 for raw in open(f, errors="ignore"):
-    if '"cwd"' in raw:
+    if not cwd and '"cwd"' in raw:
         try: cwd = json.loads(raw).get("cwd") or ""
+        except Exception: pass
+    if '"type":"assistant"' in raw:          # the model of its last real reply (not "<synthetic>" notices)
+        try: m = (json.loads(raw).get("message") or {}).get("model") or ""
         except Exception: continue
-        if cwd: break
-print(json.dumps({"cmd": cmd, "cwd": cwd}))
+        if m and m != "<synthetic>": model = m
+print(json.dumps({"cmd": cmd, "cwd": cwd, "model": model}))
 PY
 )"
   if [ -n "$FIX" ]; then
     CMD="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["cmd"])' "$FIX")"
     FC="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["cwd"])' "$FIX")"
     [ -d "$FC" ] && CWD="$FC"
+    # back on the model it was actually using (a wrapper's own default, e.g. ANTHROPIC_MODEL, would win otherwise)
+    MODEL="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["model"])' "$FIX")"
+    if [ -n "$MODEL" ]; then
+      CMD="$(/usr/bin/python3 -c 'import re,sys;print(re.sub(r"\s--model(=|\s+)\S+", "", " " + sys.argv[1]).strip())' "$CMD")"
+      MODEL_ARG="--model '$MODEL'"
+    fi
   fi
   if [ -z "$FIX" ]; then                        # no transcript found: fall back to what the launch list says
     C=$(/usr/bin/python3 -c 'import json,sys
@@ -103,13 +112,13 @@ PY
 $TMUX_BIN kill-session -t "$NAME" 2>/dev/null
 if [ -z "$CMD" ]; then
   $TMUX_BIN new-session -d -s "$NAME" -x 200 -y 50 -c "$CWD" \
-    "export PATH='$PATH'; VOICE_SESSION=1 VOICE_SESSION_NAME=$NAME $HOME/.local/bin/claude --chrome --name $NAME $SESS --mcp-config $V/voice-mcp.json --append-system-prompt \"\$(cat $V/voice-system-prompt.md)\""
+    "export PATH='$PATH'; VOICE_SESSION=1 VOICE_SESSION_NAME=$NAME $HOME/.local/bin/claude --chrome --name $NAME $SESS $MODEL_ARG --mcp-config $V/voice-mcp.json --append-system-prompt \"\$(cat $V/voice-system-prompt.md)\""
 else
   # your command, through your interactive zsh (so aliases work), with the voice options added
   mkdir -p "$V/run"; R="$V/run/$NAME.zsh"
   {
     echo "export PATH='$PATH' VOICE_SESSION=1 VOICE_SESSION_NAME=$NAME VOICE_HOOKS_FLAG=1"
-    echo "$CMD --name $NAME $SESS --mcp-config $V/voice-mcp.json --settings $V/voice-hooks.json --append-system-prompt \"\$(cat $V/voice-system-prompt.md)\""
+    echo "$CMD --name $NAME $SESS $MODEL_ARG --mcp-config $V/voice-mcp.json --settings $V/voice-hooks.json --append-system-prompt \"\$(cat $V/voice-system-prompt.md)\""
   } > "$R"
   $TMUX_BIN new-session -d -s "$NAME" -x 200 -y 50 -c "$CWD" "/bin/zsh -i $R"
 fi
