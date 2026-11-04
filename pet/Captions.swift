@@ -50,10 +50,17 @@ final class CaptionsModel: ObservableObject {
         }
     }
 
+    /// The orb moved to another conversation: its old last message isn't this one's.
+    func forget() {
+        last = nil
+        if peeking { peeking = false; hovering = false; cards.removeAll { $0.id.hasPrefix("peek-") } }
+    }
+
     /// Keep a spoken reply as the orb's "last message" (not shown now; hover the orb to see it).
     func remember(_ id: String, title: String, text: String) {
         guard !text.isEmpty else { return }
         seen.insert(id)
+        if last?.id == id && last?.title == title { return }
         last = ReplyCard(id: id, title: title, text: text, born: Date(), muted: false)
     }
 

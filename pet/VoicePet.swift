@@ -7,7 +7,10 @@ import ApplicationServices
 import SwiftUI
 
 struct SessState: Codable { var state = "idle", step = "", at = 0.0 }
-struct Caption: Codable, Equatable, Identifiable { var id = "", session = "", text = "", at = 0.0 }
+struct Caption: Codable, Equatable, Identifiable {
+    var id = "", session = "", text = "", at = 0.0
+    var sid: String? = nil                       // the conversation that said it (orb names get reused)
+}
 struct CodexPending: Codable { var method = "", detail = "", request_id = 0 }
 
 struct PendingNote: Codable, Equatable { var id = "", text = "", at = 0.0, held = false }
@@ -669,12 +672,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if m.tailX != tail { m.tailX = tail }
     }
 
+    /// Each orb's hover card belongs to the conversation it's running now: when the orb switches conversation
+    /// (or is renamed) the card starts over with that conversation's own title and last line.
+    private var bubbleFor: [String: String] = [:]          // orb name -> conversation id + title its card was made for
+    private func lastSaidFits(_ session: String, _ c: Caption) -> Bool {
+        guard let e = sessions.entries.first(where: { $0.name == session }), e.kind == "claude" else { return true }
+        return c.sid == nil || c.sid == e.id
+    }
+    private func refreshBubbleOwners() {
+        for e in sessions.entries {
+            let key = e.id + "|" + sessions.displayName(e.name)
+            guard bubbleFor[e.name] != key else { continue }
+            let changedConversation = bubbleFor[e.name].map { !$0.hasPrefix(e.id + "|") } ?? false
+            bubbleFor[e.name] = key
+            let b = bubble(for: e.name).0
+            if changedConversation { b.forget() }
+            if let c = model.s.last_said[e.name], lastSaidFits(e.name, c) {
+                b.remember(c.id, title: sessions.displayName(e.name), text: c.text)   // the current title
+            }
+        }
+    }
+
     func feedCaptions() {
+        refreshBubbleOwners()
         let list = model.s.captions
         if !captionsSeeded {                              // don't replay old replies on launch
             captionsSeeded = true
             list.forEach { seenCaptions.insert($0.id) }; lastCodexMuted = codexModel.s.muted_at
-            for (session, c) in model.s.last_said {
+            for (session, c) in model.s.last_said where lastSaidFits(session, c) {
                 seenCaptions.insert(c.id)
                 bubble(for: session).0.remember(c.id, title: sessions.displayName(session), text: c.text)
             }
@@ -690,7 +715,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         // spoken replies (not muted): kept as each orb's last message, shown when you hover the orb
-        for (session, c) in model.s.last_said where !seenCaptions.contains(c.id) {
+        for (session, c) in model.s.last_said where !seenCaptions.contains(c.id) && lastSaidFits(session, c) {
             seenCaptions.insert(c.id)
             toCanvas(c.id, session, c.text)
             bubble(for: session).0.remember(c.id, title: sessions.displayName(session), text: c.text)

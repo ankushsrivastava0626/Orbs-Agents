@@ -175,7 +175,15 @@ def speak_gemini(text, kind, cfg, my_gen):
     return False
 
 LAST_SAID = os.path.join(DIR, "last_said.json")
-try: STATUS["last_said"].update(json.load(open(LAST_SAID)))
+
+def orb_conversation(name):
+    """The conversation an orb (voice, voice-2, …) is running now: orb names get reused for other conversations."""
+    try: return next((o.get("id") or "" for o in json.load(open(os.path.join(DIR, "orbs.json"))) if o.get("name") == name), "")
+    except Exception: return ""
+
+try:                                             # only what each orb's *current* conversation last said
+    STATUS["last_said"].update({k: v for k, v in json.load(open(LAST_SAID)).items()
+                                if v.get("sid") and v.get("sid") == orb_conversation(k)})
 except Exception: pass
 
 def seed_last_said():
@@ -185,7 +193,9 @@ def seed_last_said():
     except Exception: return
     for o in orbs:
         name, sid = o.get("name"), o.get("id")
-        if o.get("kind") != "claude" or not sid or name in STATUS["last_said"]: continue
+        have = STATUS["last_said"].get(name)
+        if o.get("kind") != "claude" or not sid or (have and have.get("sid") == sid): continue
+        STATUS["last_said"].pop(name, None)            # it was another conversation's
         files = glob.glob(os.path.expanduser("~/.claude*/projects/*/" + sid + ".jsonl"))
         if not files: continue
         text, at = "", 0
@@ -198,9 +208,18 @@ def seed_last_said():
                     t = (b.get("input") or {}).get("text", "")
                     if t: text, at = t, os.path.getmtime(files[0])
         if text:
-            STATUS["last_said"][name] = {"id": f"s{at:.3f}", "session": name, "text": text, "at": at}
+            STATUS["last_said"][name] = {"id": f"s{at:.3f}", "session": name, "text": text, "at": at, "sid": sid}
 
 seed_last_said()
+
+def reseed_loop():
+    """An orb can switch conversation at any time (search, resume): pick up the new one's last line."""
+    while True:
+        time.sleep(20)
+        try: seed_last_said()
+        except Exception as e: print("last said:", repr(e)[:120], flush=True)
+
+threading.Thread(target=reseed_loop, daemon=True).start()
 
 def worker():
     while True:
@@ -210,7 +229,7 @@ def worker():
         STATUS["speaking_session"] = who
         if kind == "SAY":                                     # remember each orb's last reply (hover shows it)
             STATUS["last_said"][who or "voice"] = {"id": f"s{time.time():.3f}", "session": who or "voice",
-                                                   "text": text, "at": time.time()}
+                                                   "text": text, "at": time.time(), "sid": orb_conversation(who or "voice")}
             try: json.dump(STATUS["last_said"], open(LAST_SAID, "w"))   # kept through server restarts
             except OSError: pass
         if kind == "SAY" and (who or "voice") in STATUS["muted_sessions"]:
