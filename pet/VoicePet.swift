@@ -589,9 +589,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func menuAuto() { model.toggleAuto() }
     @objc func menuNotes() { model.toggleNotes() }
     @objc func menuOpenNotes() { model.openNotes() }
-    @objc func menuStopClaude() { model.post("/claude/stop") }
-    @objc func menuShowClaude() { model.post("/claude/show") }
-    @objc func menuQuitClaude() { model.post("/claude/quit") }
     @objc func menuTunnel() { setTunnel(tunnelPanels.isEmpty) }
     @objc func menuOSMode() { osMode.toggle() }
 
@@ -864,6 +861,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let taskBoard = TaskBoard()
     @objc func menuTaskBoard() { taskBoard.toggle() }
     @objc func menuResetPeek() { taskBoard.resetPeekLayout() }
+    @objc func menuNewTaskCard() { taskBoard.post("/task/new") }
 
     func toggleMeeting() {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/meeting")!)
@@ -1156,62 +1154,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             let menu = sessions.plusMenu()
             menu.addItem(.separator())
+            addNotesItems(to: menu)
+            menu.addItem(canvasItem())
+            menu.addItem(.separator())
             addGeneralItems(to: menu)
             menu.popUp(positioning: nil, at: point, in: view)
         }
     }
 
-    /// The pet's own options (stop, OS mode, tunnel vision, auto, notes…), shown on every orb's menu.
+    // MARK: the orb menu's pet-wide parts (the orb's own items are built in SessionsController.orbMenu)
+
+    /// A menu item with a system icon, an optional checkmark, and an optional grey hint line under it.
+    func menuItem(_ title: String, _ icon: String, _ sel: Selector?, on: Bool? = nil, hint: String? = nil,
+                  tip: String? = nil, target: AnyObject? = nil) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        i.target = target ?? self
+        i.image = NSImage(systemSymbolName: icon, accessibilityDescription: title)
+        if let on { i.state = on ? .on : .off }
+        if let hint { i.subtitle = hint }
+        i.toolTip = tip
+        return i
+    }
+
+    /// Top of the menu: notes.
+    func addNotesItems(to menu: NSMenu) {
+        menu.addItem(menuItem("Notes mode", "note.text", #selector(menuNotes), on: model.s.notes,
+                              tip: "Everything you say is saved as a note instead of sent"))
+        menu.addItem(menuItem("Open notes file", "doc", #selector(menuOpenNotes)))
+    }
+
+    func canvasItem() -> NSMenuItem {
+        menuItem("Canvas (replies as cards)", "rectangle.inset.filled", #selector(menuCanvas), on: canvas.enabled,
+                 tip: "Show what every agent says on one canvas")
+    }
+
+    /// Meetings ▸, Task boards ▸, Voice, Screen, Quit — the same on every orb's menu.
     func addGeneralItems(to menu: NSMenu) {
-        func item(_ title: String, _ sel: Selector, on: Bool? = nil) {
-            let i = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-            i.target = self
-            if let on { i.state = on ? .on : .off }
-            menu.addItem(i)
-        }
-        item("Stop Claude (interrupt current task)", #selector(menuStopClaude))
-        item("OS mode (double-tap left Option)", #selector(menuOSMode), on: osMode.on)
-        item("Canvas (show what agents say)", #selector(menuCanvas), on: canvas.enabled)
-        item("Focus timer", #selector(menuPomodoro), on: !pomodoro.hidden)
-        item(model.s.meeting ? "Stop recording meeting (right Option ×2)" : "Record meeting (right Option ×2)", #selector(menuMeeting))
-        item("Meeting board (live transcript)", #selector(menuMeetingBoard), on: meetingBoard.enabled)
-        let past = NSMenuItem(title: "Previous meetings", action: nil, keyEquivalent: "")
-        let pastMenu = NSMenu()
-        let meetings = MeetingBoard.pastMeetings()
-        for (folder, label) in meetings {
+        let meetings = NSMenu(); meetings.autoenablesItems = false
+        meetings.addItem(menuItem(model.s.meeting ? "Stop recording meeting" : "Record meeting",
+                                  model.s.meeting ? "stop.circle" : "record.circle", #selector(menuMeeting),
+                                  hint: "double-tap right ⌥"))
+        meetings.addItem(menuItem("Meeting board", "rectangle.stack", #selector(menuMeetingBoard), on: meetingBoard.enabled,
+                                  tip: "Live transcript while you record"))
+        meetings.addItem(menuItem("Record Mac audio", "speaker.wave.2", #selector(menuMacAudio), on: systemAudio.enabled,
+                                  tip: "Also record what the Mac plays (the other side of a call)"))
+        meetings.addItem(.separator())
+        let past = menuItem("Previous meetings", "clock", nil)
+        let pastMenu = NSMenu(); pastMenu.autoenablesItems = false
+        let list = MeetingBoard.pastMeetings()
+        for (folder, label) in list {
             let i = NSMenuItem(title: label, action: #selector(menuOpenPastMeeting(_:)), keyEquivalent: "")
             i.target = self; i.representedObject = folder
             i.isEnabled = !model.s.meeting                                   // not while one is recording
             pastMenu.addItem(i)
         }
-        if meetings.isEmpty { pastMenu.addItem(NSMenuItem(title: "No finished meetings yet", action: nil, keyEquivalent: "")) }
-        past.submenu = pastMenu
-        menu.addItem(past)
-        item("Task boards (show all)", #selector(menuTaskBoard), on: taskBoard.enabled)
-        item("Reset task quick-look layout", #selector(menuResetPeek), on: false)
-        item("Record Mac audio in meetings", #selector(menuMacAudio), on: systemAudio.enabled)
-        item("Open meetings folder", #selector(menuOpenMeetings))
-        item("Tunnel vision (Esc to exit)", #selector(menuTunnel), on: !tunnelPanels.isEmpty)
-        let shape = NSMenuItem(title: "Tunnel shape", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        for (title, sel, on) in [("Circle", #selector(menuShapeCircle), !tunnelRect),
-                                 ("Rectangle", #selector(menuShapeRect), tunnelRect)] {
-            let i = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-            i.target = self; i.state = on ? .on : .off
-            sub.addItem(i)
+        if list.isEmpty {
+            let i = NSMenuItem(title: "No finished meetings yet", action: nil, keyEquivalent: ""); i.isEnabled = false
+            pastMenu.addItem(i)
         }
-        shape.submenu = sub
-        menu.addItem(shape)
+        past.submenu = pastMenu
+        meetings.addItem(past)
+        meetings.addItem(menuItem("Open meetings folder", "folder", #selector(menuOpenMeetings)))
+        let m = menuItem("Meetings", "person.2", nil); m.submenu = meetings
+        menu.addItem(m)
+
+        let tasks = NSMenu(); tasks.autoenablesItems = false
+        tasks.addItem(menuItem("Show all", "rectangle.on.rectangle", #selector(menuTaskBoard)))
+        tasks.addItem(menuItem("New card", "plus", #selector(menuNewTaskCard), hint: "or hold `"))
+        tasks.addItem(menuItem("Reset quick-look layout", "arrow.counterclockwise", #selector(menuResetPeek),
+                               tip: "Forget where you dragged cards in the top-left corner view"))
+        let t = menuItem("Task boards", "checklist", nil); t.submenu = tasks
+        menu.addItem(t)
         menu.addItem(.separator())
-        item("Auto mode (hands-free)", #selector(menuAuto), on: model.s.auto)
-        item("Notes mode (save speech as notes)", #selector(menuNotes), on: model.s.notes)
+
+        menu.addItem(.sectionHeader(title: "Voice"))
+        menu.addItem(menuItem("Auto mode (hands-free)", "waveform", #selector(menuAuto), on: model.s.auto))
+        menu.addItem(.sectionHeader(title: "Screen"))
+        menu.addItem(menuItem("OS mode", "macwindow", #selector(menuOSMode), on: osMode.on, hint: "double-tap left ⌥"))
+        menu.addItem(menuItem("Focus timer", "timer", #selector(menuPomodoro), on: !pomodoro.hidden))
+        let tunnel = NSMenu(); tunnel.autoenablesItems = false
+        tunnel.addItem(menuItem("On / off", "scope", #selector(menuTunnel), on: !tunnelPanels.isEmpty, hint: "Esc to exit"))
+        tunnel.addItem(.separator())
+        tunnel.addItem(menuItem("Circle", "circle", #selector(menuShapeCircle), on: !tunnelRect))
+        tunnel.addItem(menuItem("Rectangle", "rectangle", #selector(menuShapeRect), on: tunnelRect))
+        let tv = menuItem("Tunnel vision", "scope", nil, on: !tunnelPanels.isEmpty); tv.submenu = tunnel
+        menu.addItem(tv)
         menu.addItem(.separator())
-        item("Open notes file", #selector(menuOpenNotes))
-        menu.addItem(.separator())
-        item("Show Claude session (Terminal)", #selector(menuShowClaude))
-        item("Quit Claude session", #selector(menuQuitClaude))
-        menu.addItem(.separator())
-        item("Quit VoicePet", #selector(menuQuitPet))
+        menu.addItem(menuItem("Quit VoicePet", "power", #selector(menuQuitPet)))
     }
 
     func panel(_ rect: NSRect) -> NSPanel {

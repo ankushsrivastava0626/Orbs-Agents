@@ -192,13 +192,6 @@ final class SessionsController: NSObject {
     private var held: (code: Int, name: String, downEvent: CGEvent?, live: Bool)? = nil
     private var keyTap: CFMachPort?
 
-    func hotkeyItems(for name: String, into m: NSMenu) {
-        guard let e = entries.first(where: { $0.name == name }) else { return }
-        m.addItem(item(hotkey(for: e).map { "Hold \($0.label) to talk (set by its place in the dock)" }
-                       ?? "No hotkey (only the first 10 orbs get one)", nil, enabled: false))
-        m.addItem(item("Hold Left Option to take a note", nil, enabled: false))
-    }
-
     @objc func setHotkey(_ s: NSMenuItem) {
         guard let n = s.representedObject as? String else { return }
         capturing = n
@@ -412,53 +405,62 @@ final class SessionsController: NSObject {
 
     func orbMenu(_ name: String) -> NSMenu {
         let m = NSMenu(); m.autoenablesItems = false
-        guard let e = entries.first(where: { $0.name == name }) else { return m }
-        let title = (e.kind == "codex" ? "Codex · " : "Claude · ") + (OrbNames.get(e.id) ?? e.label ?? sessionName(e))
-        let h = item(title, nil, enabled: false); h.toolTip = e.cwd; m.addItem(h)
-        let talk = item(main.s.target == name ? "✓ Talking to this session" : "Talk to this session", #selector(talkTo(_:)), name)
-        m.addItem(talk)
-        hotkeyItems(for: name, into: m)
+        guard let e = entries.first(where: { $0.name == name }), let app else { return m }
+        // header: whose menu this is, and how to talk to it
+        let h = item((e.kind == "codex" ? "Codex · " : "Claude · ") + (OrbNames.get(e.id) ?? e.label ?? sessionName(e)), nil, enabled: false)
+        let folder = URL(fileURLWithPath: e.cwd).lastPathComponent
+        h.subtitle = ([folder, lastModel(e)].filter { !$0.isEmpty }.joined(separator: " · "))
+            + " · " + (hotkey(for: e).map { "hold \($0.label) to talk" } ?? "no hotkey") + " · hold left ⌥ for a note"
+        h.toolTip = e.cwd
+        m.addItem(h)
         m.addItem(.separator())
-        m.addItem(item("Rename…", #selector(rename(_:)), name))
-        m.addItem(item("Open transcript", #selector(transcript(_:)), name))
-        if e.kind == "claude" { m.addItem(item("Show in Terminal", #selector(showTerminal(_:)), name)) }
-        m.addItem(item("Stop current task", #selector(stopTask(_:)), name))
+        app.addNotesItems(to: m)
+        m.addItem(.separator())
+
+        // this orb
+        m.addItem(app.menuItem("Stop current task", "stop", #selector(stopTask(_:)), target: self).with(name))
         let muted = e.kind == "codex" ? (codex.s.thread_id == e.id && codex.s.muted) : main.s.muted_sessions.contains(name)
-        let mi = item("Mute (show replies as text)", #selector(toggleMute(_:)), name)
-        mi.state = muted ? .on : .off
-        m.addItem(mi)
-        let resume = NSMenuItem(title: "Resume another session here", action: nil, keyEquivalent: "")
-        resume.submenu = resumeMenu(for: e)
-        m.addItem(resume)
-        if e.kind == "codex", codex.s.thread_id == e.id {
-            m.addItem(item(codex.s.auto ? "✓ Codex auto mode" : "Codex auto mode", #selector(codexAuto)))
+        m.addItem(app.menuItem("Mute replies", "speaker.slash", #selector(toggleMute(_:)), on: muted,
+                               tip: "Show this orb's replies as text instead of speaking them", target: self).with(name))
+        m.addItem(app.canvasItem())
+        m.addItem(app.menuItem("Rename…", "pencil", #selector(rename(_:)), target: self).with(name))
+        let more = NSMenu(); more.autoenablesItems = false
+        more.addItem(app.menuItem("Open transcript", "doc.text", #selector(transcript(_:)), target: self).with(name))
+        if e.kind == "claude" {
+            more.addItem(app.menuItem("Show in Terminal", "terminal", #selector(showTerminal(_:)), target: self).with(name))
         }
+        if e.kind == "codex", codex.s.thread_id == e.id {
+            more.addItem(app.menuItem("Codex auto mode", "bolt", #selector(codexAuto), on: codex.s.auto, target: self))
+        }
+        let mo = app.menuItem("More", "ellipsis.circle", nil, target: self); mo.submenu = more
+        m.addItem(mo)
+        m.addItem(app.menuItem("Close session", "xmark", #selector(close(_:)), target: self).with(name))
         m.addItem(.separator())
-        m.addItem(item("Close session", #selector(close(_:)), name))
-        m.addItem(.separator())
-        app?.addGeneralItems(to: m)                                  // auto mode, notes, tunnel, OS mode… as before
+
+        app.addGeneralItems(to: m)                                  // meetings, task boards, voice, screen, quit
         return m
     }
 
-    private func resumeMenu(for e: OrbEntry) -> NSMenu {
-        let sub = NSMenu(); sub.autoenablesItems = false
-        let fmt = DateFormatter(); fmt.dateFormat = "MMM d, h:mm a"
-        if e.kind == "claude" {
-            for s in app?.voiceSessions()?.sessions ?? [] {
-                let i = item("\(s.name)  ·  \(URL(fileURLWithPath: s.cwd).lastPathComponent) · \(fmt.string(from: Date(timeIntervalSince1970: s.started)))",
-                             #selector(resumeClaude(_:)), [e.name, s.id])
-                i.state = s.id == e.id ? .on : .off; i.toolTip = s.cwd
-                sub.addItem(i)
-            }
-        } else {
-            for s in codexSessions() {
-                let i = item((OrbNames.get(s.id) ?? s.name) + "  ·  " + URL(fileURLWithPath: s.cwd).lastPathComponent, #selector(resumeCodex(_:)), [e.name, s.id])
-                i.state = s.id == e.id ? .on : .off; i.toolTip = s.cwd
-                sub.addItem(i)
+    /// The model this orb's conversation last ran on, from the end of its transcript (cheap: last 64 KB).
+    private func lastModel(_ e: OrbEntry) -> String {
+        guard e.kind == "claude", !e.id.isEmpty else { return "" }
+        let root = NSHomeDirectory()
+        let dirs = ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).filter { $0.hasPrefix(".claude") }
+        for d in dirs {
+            let projects = root + "/" + d + "/projects"
+            for p in (try? FileManager.default.contentsOfDirectory(atPath: projects)) ?? [] {
+                let f = projects + "/" + p + "/" + e.id + ".jsonl"
+                guard let h = FileHandle(forReadingAtPath: f) else { continue }
+                defer { try? h.close() }
+                let end = (try? h.seekToEnd()) ?? 0
+                try? h.seek(toOffset: end > 65536 ? end - 65536 : 0)
+                let tail = String(decoding: h.readDataToEndOfFile(), as: UTF8.self)
+                let models = tail.components(separatedBy: "\"model\":\"").dropFirst()
+                    .compactMap { $0.split(separator: "\"").first.map(String.init) }.filter { $0 != "<synthetic>" }
+                return models.last.map { $0.components(separatedBy: "/").last ?? $0 } ?? ""
             }
         }
-        if sub.items.isEmpty { sub.addItem(item("No saved sessions", nil, enabled: false)) }
-        return sub
+        return ""
     }
 
     private func sessionName(_ e: OrbEntry) -> String {
@@ -542,7 +544,6 @@ final class SessionsController: NSObject {
         typeBox.open(above: anchor, name: e.name, kind: e.kind, title: "To " + displayName(e.name))
     }
 
-    @objc func talkTo(_ s: NSMenuItem) { if let n = s.representedObject as? String { select(n) } }
 
     private func nextName(_ base: String) -> String {
         var i = 2
@@ -604,19 +605,6 @@ final class SessionsController: NSObject {
             self.save()
             self.post5123("/target", ["name": name, "kind": "codex"])
         }
-    }
-
-    @objc func resumeClaude(_ s: NSMenuItem) {
-        guard let a = s.representedObject as? [String] else { return }
-        startClaude(a[0], ["--resume", a[1]])
-    }
-
-    @objc func resumeCodex(_ s: NSMenuItem) {
-        guard let a = s.representedObject as? [String], let i = entries.firstIndex(where: { $0.name == a[0] }) else { return }
-        entries[i].id = a[1]
-        entries[i].label = codexSessions().first { $0.id == a[1] }?.name
-        save()
-        select(a[0])
     }
 
     @objc func transcript(_ s: NSMenuItem) {
@@ -763,4 +751,9 @@ final class SessionsController: NSObject {
             DispatchQueue.main.async { done?(r) }
         }.resume()
     }
+}
+
+extension NSMenuItem {
+    /// Attach the orb this item acts on.
+    func with(_ rep: Any?) -> NSMenuItem { representedObject = rep; return self }
 }
