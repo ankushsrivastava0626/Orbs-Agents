@@ -83,8 +83,8 @@ def load_models():
         models_ready.set()
         print(f"local voices loaded ({time.time() - t:.1f}s)", flush=True)
 
-import keep_resident                             # speech-to-text model + program stay in RAM (8 GB Mac)
-keep_resident.start()
+import keep_resident                             # pins models in RAM; off (KEEP_RESIDENT=on in config to pin again)
+if config().get("KEEP_RESIDENT", "off") == "on": keep_resident.start()
 threading.Thread(target=load_models, daemon=True).start()
 
 gemini_blocked_until = 0.0
@@ -613,7 +613,7 @@ def speech_seconds(path):
         if _gate_vad is None:
             from silero_vad import load_silero_vad
             _gate_vad = load_silero_vad()
-            keep_resident.pin_weights(_gate_vad)
+            config().get("KEEP_RESIDENT", "off") == "on" and keep_resident.pin_weights(_gate_vad)
         _gate_vad.reset_states()
         n, voiced = 512, 0
         for i in range(0, len(audio) - n + 1, n):
@@ -689,7 +689,7 @@ def auto_listen():
     import soundfile as sf
     from silero_vad import load_silero_vad
     vad = load_silero_vad()
-    keep_resident.pin_weights(vad)
+    config().get("KEEP_RESIDENT", "off") == "on" and keep_resident.pin_weights(vad)
     CH = 512                                   # 32 ms at 16 kHz (Silero's frame size)
     while True:
         if not STATUS["auto"] or STATUS["ptt"] or TASK["recording"]:   # task board recording: your words go there
@@ -848,8 +848,9 @@ def warm_stt():
         stt_warm.set()
         try: os.unlink(f.name)
         except OSError: pass
-        try: keep_resident.pin_files()                # a fresh compile: pin it now, not in 10 min
-        except Exception: pass
+        if config().get("KEEP_RESIDENT", "off") == "on":
+            try: keep_resident.pin_files()            # a fresh compile: pin it now, not in 10 min
+            except Exception: pass
     print(f"stt: warm ({time.time() - t:.1f}s)", flush=True)
 
 stt_warm = threading.Event()
