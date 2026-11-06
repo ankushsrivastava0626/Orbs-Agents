@@ -396,6 +396,16 @@ final class SessionsController: NSObject {
         m.addItem(item("New Claude session", #selector(newClaude)))
         m.addItem(item("New Claude session in folder…", #selector(newClaudeInFolder)))
         m.addItem(item("New orb with custom command…", #selector(newCustom)))
+        let agents = cueAgents()
+        let ag = NSMenuItem(title: "New orb from CUE agent", action: nil, keyEquivalent: "")
+        let agMenu = NSMenu(); agMenu.autoenablesItems = false
+        for (slug, name, model) in agents {
+            let i = item(name, #selector(newFromAgent(_:)), slug); i.toolTip = model
+            agMenu.addItem(i)
+        }
+        if agents.isEmpty { agMenu.addItem(item("None yet: use Run as orb in CUE Studio", nil, enabled: false)) }
+        ag.submenu = agMenu
+        m.addItem(ag)
         m.addItem(.separator())
         m.addItem(item("New Codex session", #selector(newCodex), enabled: codex.online))
         m.addItem(item("New Codex session in folder…", #selector(newCodexInFolder), enabled: codex.online))
@@ -553,6 +563,21 @@ final class SessionsController: NSObject {
 
     private func newClaudeName() -> String { entries.contains { $0.name == "voice" } ? nextName("voice") : "voice" }
     @objc func newClaude() { startClaude(newClaudeName(), ["--fresh"]) }
+
+    /// Agents exported from CUE Studio (~/.claude/voice/agents/<slug>/agent.json): (slug, name, model), by name.
+    func cueAgents() -> [(String, String, String)] {
+        let root = NSHomeDirectory() + "/.claude/voice/agents"
+        return ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).compactMap { slug in
+            guard let d = FileManager.default.contents(atPath: root + "/" + slug + "/agent.json"),
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  (j["engine"] as? String ?? "claude") == "claude" else { return nil }
+            return (slug, j["name"] as? String ?? slug, j["model"] as? String ?? "")
+        }.sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
+    }
+
+    @objc func newFromAgent(_ s: NSMenuItem) {
+        if let slug = s.representedObject as? String { startClaude(newClaudeName(), ["--fresh", "--agent", slug]) }
+    }
     @objc func newClaudeInFolder() { if let f = pickFolder("New Claude voice session in folder") { startClaude(newClaudeName(), ["--fresh", "--cwd", f]) } }
 
     /// Your own terminal command instead of `claude` (claude-openrouter, claude --model …, an alias…).
