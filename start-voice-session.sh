@@ -6,13 +6,14 @@
 #   ... --name voice-2                         run it as another orb/session (tmux session name; default "voice")
 #   ... --fresh                                always a brand-new conversation
 #   ... --cmd "claude-openrouter"              run this command instead of claude (kept with the orb)
+#   ... --agent <slug>                         run an agent designed in CUE Studio (agents/<slug>/; kept with the orb)
 # With no --resume and no --fresh, an orb resumes its own last conversation (after a restart or a crash).
 # Full paths: this also runs from the voice server's / pet's minimal launchd environment.
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 V="$HOME/.claude/voice"; TMUX_BIN=/opt/homebrew/bin/tmux
 CWD="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("cwd",""))' "$V/session.json" 2>/dev/null)"
 [ -d "$CWD" ] || CWD="/Users/kush/Githubs/persistent agent"
-RESUME=""; NAME="voice"; FRESH=0; CMD=""; MODEL_ARG=""
+RESUME=""; NAME="voice"; FRESH=0; CMD=""; MODEL_ARG=""; AGENT=""; AGENT_ARGS=""; PROMPT="$V/voice-system-prompt.md"
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
@@ -20,12 +21,26 @@ while [ $# -gt 0 ]; do
     --cwd) CWD="$2"; shift 2 ;;
     --resume) RESUME="$2"; shift 2 ;;
     --cmd) CMD="$2"; shift 2 ;;
+    --agent) AGENT="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 # an orb started with a custom command keeps using it (relaunch, resume)
 [ -z "$CMD" ] && CMD="$(/usr/bin/python3 -c 'import json,sys
 o=next((o for o in json.load(open(sys.argv[1])) if o.get("name")==sys.argv[2]),{});print(o.get("command",""))' "$V/orbs.json" "$NAME" 2>/dev/null)"
+# an orb made from a CUE Studio agent keeps being that agent (relaunch, resume)
+[ -z "$AGENT" ] && AGENT="$(/usr/bin/python3 -c 'import json,sys
+o=next((o for o in json.load(open(sys.argv[1])) if o.get("name")==sys.argv[2]),{});print(o.get("agent",""))' "$V/orbs.json" "$NAME" 2>/dev/null)"
+if [ -n "$AGENT" ]; then
+  mkdir -p "$V/run"; PROMPT="$V/run/$NAME.prompt.md"
+  AJ="$(/usr/bin/python3 "$V/orb_agent.py" "$AGENT" "$PROMPT")" || { echo "agent $AGENT: can't read agents/$AGENT/"; exit 1; }
+  CMD="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["cmd"])' "$AJ")"
+  AGENT_ARGS="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["args"])' "$AJ")"
+  AM="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["model"])' "$AJ")"
+  AC="$(/usr/bin/python3 -c 'import json,sys;print(json.loads(sys.argv[1])["cwd"])' "$AJ")"
+  [ -d "$AC" ] && CWD="$AC"
+  # always the custom-command line below (it passes the voice hooks); orb_agent.py already adds them
+fi
 # no explicit choice: pick the orb's own conversation back up, if its transcript exists
 if [ -z "$RESUME" ] && [ "$FRESH" = 0 ]; then
   RESUME="$(/usr/bin/python3 "$V/orb_last_session.py" "$V/orbs.json" "$NAME")"
@@ -79,9 +94,9 @@ else
   SESS="--session-id $ID"
 fi
 # remember the current session, and keep a list of voice sessions for "Resume"
-/usr/bin/python3 - "$V" "$ID" "$CWD" "$NAME" "$CMD" <<'PY'
+/usr/bin/python3 - "$V" "$ID" "$CWD" "$NAME" "$CMD" "$AGENT" <<'PY'
 import fcntl, json, os, sys, time
-v, sid, cwd, name, cmd = sys.argv[1:6]
+v, sid, cwd, name, cmd, agent = sys.argv[1:7]
 # two orbs starting at once must not write over each other: one at a time, and each file swapped in whole
 lock = open(os.path.join(v, ".launch.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_EX)
 def save(path, data):
@@ -96,6 +111,10 @@ old = next((o for o in orbs if o.get("name") == name), {})
 entry = {"name": name, "kind": "claude", "id": sid, "cwd": cwd}
 if "hotkey" in old: entry["hotkey"] = old["hotkey"]          # keep the orb's speak hotkey
 if "label" in old: entry["label"] = old["label"]
+if agent:
+    entry["agent"] = agent
+    try: entry["label"] = json.load(open(os.path.join(v, "agents", agent, "agent.json"))).get("name") or agent
+    except Exception: entry["label"] = agent
 if cmd:
     entry["command"] = cmd
     entry.setdefault("label", cmd.split()[0].split("/")[-1] + " · " + os.path.basename(cwd.rstrip("/")))
@@ -109,16 +128,18 @@ except Exception: lst = []
 lst = [s for s in lst if s["id"] != sid] + [{"id": sid, "cwd": cwd, "started": time.time()}]
 save(p, lst[-500:])
 PY
+[ -n "$AGENT" ] && [ -n "$AM" ] && MODEL_ARG="--model '$AM'"   # the design's model, also on resume
 $TMUX_BIN kill-session -t "$NAME" 2>/dev/null
 if [ -z "$CMD" ]; then
   $TMUX_BIN new-session -d -s "$NAME" -x 200 -y 50 -c "$CWD" \
-    "export PATH='$PATH'; VOICE_SESSION=1 VOICE_SESSION_NAME=$NAME $HOME/.local/bin/claude --chrome --name $NAME $SESS $MODEL_ARG --mcp-config $V/voice-mcp.json --append-system-prompt \"\$(cat $V/voice-system-prompt.md)\""
+    "export PATH='$PATH'; VOICE_SESSION=1 VOICE_SESSION_NAME=$NAME $HOME/.local/bin/claude --chrome --name $NAME $SESS $MODEL_ARG --mcp-config $V/voice-mcp.json $AGENT_ARGS --append-system-prompt \"\$(cat '$PROMPT')\""
 else
   # your command, through your interactive zsh (so aliases work), with the voice options added
   mkdir -p "$V/run"; R="$V/run/$NAME.zsh"
   {
     echo "export PATH='$PATH' VOICE_SESSION=1 VOICE_SESSION_NAME=$NAME VOICE_HOOKS_FLAG=1"
-    echo "$CMD --name $NAME $SESS $MODEL_ARG --mcp-config $V/voice-mcp.json --settings $V/voice-hooks.json --append-system-prompt \"\$(cat $V/voice-system-prompt.md)\""
+    HOOKS="--settings $V/voice-hooks.json"; [ -n "$AGENT" ] && HOOKS=""
+    echo "$CMD --name $NAME $SESS $MODEL_ARG --mcp-config $V/voice-mcp.json $AGENT_ARGS $HOOKS --append-system-prompt \"\$(cat '$PROMPT')\""
   } > "$R"
   $TMUX_BIN new-session -d -s "$NAME" -x 200 -y 50 -c "$CWD" "/bin/zsh -i $R"
 fi
