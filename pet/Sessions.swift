@@ -436,6 +436,13 @@ final class SessionsController: NSObject {
                                tip: "Show this orb's replies as text instead of speaking them", target: self).with(name))
         m.addItem(app.canvasItem())
         m.addItem(app.menuItem("Rename…", "pencil", #selector(rename(_:)), target: self).with(name))
+        if (e.command ?? "").contains("openrouter") {                // your own instructions for this conversation
+            let has = Self.systemPrompt(e.id) != nil
+            m.addItem(app.menuItem(has ? "Edit system prompt…" : "Add system prompt…", "text.bubble",
+                                   #selector(editSystemPrompt(_:)), on: has ? true : nil,
+                                   tip: "Your instructions for this conversation; the orb restarts on it to apply them",
+                                   target: self).with(name))
+        }
         let more = NSMenu(); more.autoenablesItems = false
         more.addItem(app.menuItem("Open transcript", "doc.text", #selector(transcript(_:)), target: self).with(name))
         if e.kind == "claude" {
@@ -646,6 +653,42 @@ final class SessionsController: NSObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !path.isEmpty { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
         }
+    }
+
+    static func promptPath(_ id: String) -> String { NSHomeDirectory() + "/.claude/voice/prompts/" + id + ".md" }
+    static func systemPrompt(_ id: String) -> String? {
+        guard !id.isEmpty, let t = try? String(contentsOfFile: promptPath(id), encoding: .utf8),
+              !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return t
+    }
+
+    /// Add or edit this conversation's system prompt, then restart the orb on the same conversation to use it.
+    @objc func editSystemPrompt(_ s: NSMenuItem) {
+        guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }), !e.id.isEmpty else { return }
+        let a = NSAlert()
+        a.messageText = "System prompt for \(OrbNames.get(e.id) ?? e.label ?? n)"
+        a.informativeText = "Added to this conversation's instructions (after Joe's voice ones). Saving restarts the orb on the "
+            + "same conversation so it takes effect. Leave empty to remove it."
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 220))
+        scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+        let tv = NSTextView(frame: scroll.bounds)
+        tv.isRichText = false; tv.font = .systemFont(ofSize: 13); tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.autoresizingMask = [.width]; tv.textContainerInset = NSSize(width: 4, height: 6)
+        tv.string = Self.systemPrompt(e.id) ?? ""
+        scroll.documentView = tv
+        a.accessoryView = scroll
+        a.addButton(withTitle: "Save & restart"); a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        a.window.initialFirstResponder = tv
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let text = tv.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = Self.promptPath(e.id)
+        if text.isEmpty { try? FileManager.default.removeItem(atPath: path) }
+        else {
+            try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            try? (text + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        startClaude(n, ["--resume", e.id])                               // same conversation, new instructions
     }
 
     @objc func rename(_ s: NSMenuItem) {

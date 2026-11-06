@@ -93,6 +93,12 @@ else
   ID=$(/usr/bin/uuidgen | tr 'A-Z' 'a-z')
   SESS="--session-id $ID"
 fi
+# your own system prompt for this conversation (orb menu → System prompt…): added after the voice instructions
+if [ -s "$V/prompts/$ID.md" ]; then
+  mkdir -p "$V/run"; P2="$V/run/$NAME.full-prompt.md"
+  { cat "$PROMPT"; printf '\n\n# YOUR INSTRUCTIONS FOR THIS SESSION\n\n'; cat "$V/prompts/$ID.md"; } > "$P2"
+  PROMPT="$P2"
+fi
 # remember the current session, and keep a list of voice sessions for "Resume"
 /usr/bin/python3 - "$V" "$ID" "$CWD" "$NAME" "$CMD" "$AGENT" <<'PY'
 import fcntl, json, os, sys, time
