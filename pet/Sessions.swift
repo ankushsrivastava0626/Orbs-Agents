@@ -399,8 +399,10 @@ final class SessionsController: NSObject {
         let agents = cueAgents()
         let ag = NSMenuItem(title: "New orb from CUE agent", action: nil, keyEquivalent: "")
         let agMenu = NSMenu(); agMenu.autoenablesItems = false
-        for (slug, name, model) in agents {
-            let i = item(name, #selector(newFromAgent(_:)), slug); i.toolTip = model
+        for (slug, name, model, engine) in agents {
+            let i = item(name + (engine == "codex" ? "  ·  Codex" : ""), #selector(newFromAgent(_:)), [slug, engine])
+            i.toolTip = model
+            i.isEnabled = engine != "codex" || codex.online
             agMenu.addItem(i)
         }
         if agents.isEmpty { agMenu.addItem(item("None yet: use Run as orb in CUE Studio", nil, enabled: false)) }
@@ -564,19 +566,20 @@ final class SessionsController: NSObject {
     private func newClaudeName() -> String { entries.contains { $0.name == "voice" } ? nextName("voice") : "voice" }
     @objc func newClaude() { startClaude(newClaudeName(), ["--fresh"]) }
 
-    /// Agents exported from CUE Studio (~/.claude/voice/agents/<slug>/agent.json): (slug, name, model), by name.
-    func cueAgents() -> [(String, String, String)] {
+    /// Agents exported from CUE Studio (~/.claude/voice/agents/<slug>/agent.json): (slug, name, model, engine), by name.
+    func cueAgents() -> [(String, String, String, String)] {
         let root = NSHomeDirectory() + "/.claude/voice/agents"
         return ((try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []).compactMap { slug in
             guard let d = FileManager.default.contents(atPath: root + "/" + slug + "/agent.json"),
-                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                  (j["engine"] as? String ?? "claude") == "claude" else { return nil }
-            return (slug, j["name"] as? String ?? slug, j["model"] as? String ?? "")
+                  let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+            return (slug, j["name"] as? String ?? slug, j["model"] as? String ?? "", j["engine"] as? String ?? "claude")
         }.sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
     }
 
     @objc func newFromAgent(_ s: NSMenuItem) {
-        if let slug = s.representedObject as? String { startClaude(newClaudeName(), ["--fresh", "--agent", slug]) }
+        guard let a = s.representedObject as? [String], a.count == 2 else { return }
+        if a[1] == "codex" { startCodex(nil, agent: a[0]) }
+        else { startClaude(newClaudeName(), ["--fresh", "--agent", a[0]]) }
     }
     @objc func newClaudeInFolder() { if let f = pickFolder("New Claude voice session in folder") { startClaude(newClaudeName(), ["--fresh", "--cwd", f]) } }
 
@@ -619,9 +622,13 @@ final class SessionsController: NSObject {
     @objc func newCodex() { startCodex(nil) }
     @objc func newCodexInFolder() { if let f = pickFolder("New Codex voice session in folder") { startCodex(f) } }
 
-    private func startCodex(_ cwd: String?) {
+    private func startCodex(_ cwd: String?, agent: String? = nil) {
         var body: [String: String] = [:]
         if let cwd { body["cwd"] = cwd }
+        if let agent {                                                    // a Codex agent designed in CUE Studio
+            body["agent"] = agent
+            body["name"] = cueAgents().first { $0.0 == agent }?.1 ?? agent
+        }
         codexPost("/sessions/new", body) { [weak self] result in
             guard let self, let id = result?["id"] as? String else { return }
             let name = self.entries.contains(where: { $0.name == "codex" }) ? self.nextName("codex") : "codex"
