@@ -7,6 +7,8 @@ claude or codex (never an orb) are left out.
 Every word must appear (case-insensitive). No words: every session, newest first.
 Text pulled from each transcript is cached by file mtime, so hundreds of sessions stay fast."""
 import glob, json, os, re, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import moved_paths
 
 V = os.path.expanduser("~/.claude/voice")
 PROJECTS = os.path.expanduser("~/.claude/projects")
@@ -166,6 +168,7 @@ def main():
         if not (c["orb"] or s["id"] in launched): continue           # never an orb's: started straight from claude
         if not c["text"].strip(): continue                    # never actually talked to it
         cwd = c.get("cwd") or s["cwd"]
+        cwd = moved_paths.where(cwd) or cwd                         # folders that moved show where they are now
         named = c.get("title") if not re.fullmatch(r"voice(-\d+)?", c.get("title") or "") else ""   # "voice-3" is just the orb
         title = names.get(s["id"]) or named or c["first"][:80] or s["name"] or os.path.basename(cwd.rstrip("/"))
         # what's searched: the title, the folder path, and everything said — titles and folders count most

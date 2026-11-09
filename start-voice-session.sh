@@ -12,7 +12,7 @@
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 V="$HOME/.claude/voice"; TMUX_BIN=/opt/homebrew/bin/tmux
 CWD="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("cwd",""))' "$V/session.json" 2>/dev/null)"
-[ -d "$CWD" ] || CWD="/Users/kush/Githubs/persistent agent"
+[ -d "$CWD" ] || CWD="/Users/kush/1/02_Projects/Repos/persistent agent"
 RESUME=""; NAME="voice"; FRESH=0; CMD=""; MODEL_ARG=""; AGENT=""; AGENT_ARGS=""; PROMPT="$V/voice-system-prompt.md"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -68,6 +68,12 @@ for raw in open(f, errors="ignore"):
         try: m = (json.loads(raw).get("message") or {}).get("model") or ""
         except Exception: continue
         if m and m != "<synthetic>": model = m
+if cwd and not os.path.isdir(cwd):                # its folder moved: run it from the new one
+    sys.path.insert(0, os.path.expanduser("~/.claude/voice"))
+    import moved_paths
+    new = moved_paths.where(cwd)
+    if new:
+        f = os.path.realpath(f); moved_paths.link_transcript(f, new); cwd = new
 print(json.dumps({"cmd": cmd, "cwd": cwd, "model": model}))
 PY
 )"

@@ -559,7 +559,7 @@ def send_to_claude(text):
     STATUS["sessions"][target] = {"state": "working", "step": "", "at": time.time()}
 
 def notes_file():
-    return os.path.expanduser(config().get("NOTES_FILE", "/Users/kush/Githubs/persistent agent/notes/notes.md"))
+    return os.path.expanduser(config().get("NOTES_FILE", "/Users/kush/1/02_Projects/Repos/persistent agent/notes/notes.md"))
 
 def save_note(text):
     """Notes mode: append one line per utterance with date and time, instead of sending to Claude."""
@@ -1188,7 +1188,7 @@ OPENROUTER_MODEL = "inception/mercury-3"
 def openrouter(messages, max_tokens=4000):
     """One reply from Mercury on OpenRouter. The key is read from your .env (never stored here)."""
     import urllib.request
-    env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/Githubs/.env"))
+    env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/1/.env"))
     key = next((l.split("=", 1)[1].strip().strip('"\'') for l in open(env) if l.startswith("OPENROUTER_API_KEY=")), "")
     if not key: raise RuntimeError("no OPENROUTER_API_KEY in " + env)
     req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", method="POST",

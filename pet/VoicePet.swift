@@ -180,7 +180,7 @@ final class Model: ObservableObject {
     }
 
     func openNotes() {
-        let path = "/Users/kush/Githubs/persistent agent/notes/notes.md"
+        let path = "/Users/kush/1/02_Projects/Repos/persistent agent/notes/notes.md"
         let url = URL(fileURLWithPath: path)
         if !FileManager.default.fileExists(atPath: path) {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
