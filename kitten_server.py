@@ -433,7 +433,7 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps({"muted": STATUS["muted_sessions"]}).encode()); return
-        if self.path.startswith("/task/"):       # task boards: record / new / ask Mercury / edit / delete / hide / show all
+        if self.path.startswith("/task/"):       # task boards: record / new / ask the AI / edit / delete / hide / show all
             try: ev = json.loads(body or "{}")
             except Exception: ev = {}
             task_post(self.path, ev)
@@ -1264,10 +1264,10 @@ def transcript_lines(segs, upto=None):
         last = (g["speaker"], [g["text"]], g["start"]); out.append(last)
     return [f"[{_ts(st)}] {who}: {' '.join(t)}" for who, t, st in out]
 
-OPENROUTER_MODEL = "inception/mercury-3"
+OPENROUTER_MODEL = "minimax/minimax-m3.1-flash"   # task board reshape, meeting board prompt and Ask
 
 def openrouter(messages, max_tokens=4000):
-    """One reply from Mercury on OpenRouter. The key is read from your .env (never stored here)."""
+    """One reply from the boards' AI model on OpenRouter. The key is read from your .env (never stored here)."""
     import urllib.request
     env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/1/.env"))
     key = next((l.split("=", 1)[1].strip().strip('"\'') for l in open(env) if l.startswith("OPENROUTER_API_KEY=")), "")
@@ -1344,7 +1344,7 @@ def meeting_live():
         if time.time() - LIVE["seen"] < 10 and MEETING["on"] and LIVE["folder"] == MEETING["folder"] and not LIVE["final"]:
             live_pass(LIVE["folder"])
 
-# ---- Task boards: say a list (or anything), see it written down, then have Mercury reshape it.
+# ---- Task boards: say a list (or anything), see it written down, then have the AI reshape it.
 # Several cards can be on screen; each is its own board. One records at a time (there's one mic).
 TASKS = os.path.join(DIR, "tasks")
 CARDS_FILE = os.path.join(TASKS, "cards.json")       # every card (survives restarts)
@@ -1503,9 +1503,9 @@ def task_ask(cid, prompt):
                     "every item they said unless told otherwise; don't invent new ones. Format it however you think "
                     "reads best. Output only the result, no preamble."},
                 {"role": "user", "content": "What I said:\n" + c["original"] + "\n\nInstruction: " + prompt}])
-            if not out: out = "Mercury came back empty. Try the prompt again."
+            if not out: out = "The AI came back empty. Try the prompt again."
         except Exception as e:
-            out = "Couldn't reach Mercury: " + str(e)[:150]
+            out = "Couldn't reach the AI: " + str(e)[:150]
         c.update(ai=out, busy=False)
         task_save()
     threading.Thread(target=run, daemon=True).start()

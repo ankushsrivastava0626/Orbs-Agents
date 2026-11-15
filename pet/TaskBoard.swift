@@ -1,5 +1,5 @@
 // Task board: a card you talk to. Hit record, say your tasks (or anything); your words appear as you speak.
-// Then tell Mercury what to do with them ("lab work at the top, personal at the bottom", "make it concise")
+// Then tell the AI what to do with them ("lab work at the top, personal at the bottom", "make it concise")
 // and the card flips to its version. Flip back to see what you actually said and try a different prompt —
 // every prompt starts from your own words, never from the last result. Each card is its own board on screen:
 // + or holding ` opens another; ✕ only hides one (the pet's "Task board" menu item brings them all back);
@@ -21,7 +21,7 @@ struct ServerTasks: Decodable { let rec: ServerRec; let cards: [ServerCard] }
 final class TaskBoardModel: ObservableObject {
     @Published var v = TaskView()
     @Published var shown = false
-    @Published var flipped = false              // showing Mercury's version
+    @Published var flipped = false              // showing the AI's version
     static let defaultPrompt = "organize this into what to do"
     @Published var prompt = TaskBoardModel.defaultPrompt   // ready to send, never sent on its own
     @Published var sent = false                 // a prompt is out: flip when its answer lands
@@ -131,7 +131,7 @@ struct TaskBoardView: View {
                 .opacity(m.v.otherRecording ? 0.35 : 1)
                 .help(m.v.recording ? "Stop recording" : (m.v.original.isEmpty ? "Record" : "Record more (adds to it)"))
 
-                HStack(spacing: 6) {                                         // what Mercury should do with it
+                HStack(spacing: 6) {                                         // what the AI should do with it
                     Image(systemName: "sparkles").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.4))
                     TextField(m.v.ai.isEmpty ? "e.g. lab work at top, personal at bottom" : "Try a different prompt",
                               text: $m.prompt)
@@ -139,7 +139,7 @@ struct TaskBoardView: View {
                         .onSubmit { m.onAsk() }
                     if m.v.busy { ProgressView().controlSize(.small).scaleEffect(0.6) }
                     else {
-                        iconButton("arrow.up", "Send to Mercury", m.onAsk)
+                        iconButton("arrow.up", "Send to AI", m.onAsk)
                             .opacity(canAsk ? 1 : 0.4)
                     }
                 }
@@ -165,7 +165,7 @@ struct TaskBoardView: View {
                 iconButton("trash", "Delete this card", m.onDelete)
             }
             iconButton("plus", "New card (this one stays)", m.onNew)
-            if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show Mercury's version") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = true } }
+            if !m.v.ai.isEmpty { iconButton("arrow.triangle.2.circlepath", "Show the AI version") { if !m.editing.isEmpty { m.onSaveEdit() }; m.flipped = true } }
             iconButton("xmark", "Hide (the pet's Task board menu brings it back)", m.onClose)
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 8)
@@ -174,7 +174,7 @@ struct TaskBoardView: View {
     private var backHeader: some View {
         HStack(spacing: 7) {
             Image(systemName: "sparkles").font(.system(size: 9, weight: .bold)).foregroundColor(.white.opacity(0.45))
-            Text(m.v.prompt.isEmpty ? "Mercury" : m.v.prompt).font(.system(size: 10, weight: .semibold, design: .rounded))
+            Text(m.v.prompt.isEmpty ? "AI version" : m.v.prompt).font(.system(size: 10, weight: .semibold, design: .rounded))
                 .foregroundColor(.white.opacity(0.55)).lineLimit(1).truncationMode(.tail)
             Spacer()
             editButton("ai")
@@ -202,7 +202,7 @@ struct TaskBoardView: View {
         !m.prompt.trimmingCharacters(in: .whitespaces).isEmpty && !m.v.original.isEmpty && !m.v.busy
     }
 
-    // MARK: back — Mercury's version
+    // MARK: back — the AI's version
 
     private var back: some View {
         card(backHeader) {
@@ -224,11 +224,13 @@ struct TaskBoardView: View {
         }
     }
 
-    /// Mercury's plain text as a list: # topics, ## subtopics, and bullets nested by their indentation.
+    /// the AI's plain text as a list: # topics, ## subtopics, and bullets nested by their indentation.
     @ViewBuilder private func aiLine(_ raw: String) -> some View {
         let lead = raw.prefix { $0 == " " || $0 == "\t" }
         let depth = min(4, lead.reduce(0) { $0 + ($1 == "\t" ? 2 : 1) } / 2)
         let line = raw.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: #"^([-*•] )\[[ xX]\] "#, with: "$1", options: .regularExpression)   // checkboxes
+            .replacingOccurrences(of: #"(?<![\w*])[*_]([^*_]+)[*_](?![\w*])"#, with: "$1", options: .regularExpression)   // *italics*
         let number = line.range(of: #"^\d+[.)] "#, options: .regularExpression)
         if line.isEmpty {
             Color.clear.frame(height: 4)
@@ -455,7 +457,7 @@ final class TaskBoard: NSObject {
             v.otherRecording = t.rec.recording && !mine
             let b = boards[c.id] ?? {
                 let b = TaskCardWindow(id: c.id, board: self, place: boards.count)
-                b.m.flipped = !c.ai.isEmpty && !v.recording          // first shown: Mercury's version, if it has one
+                b.m.flipped = !c.ai.isEmpty && !v.recording          // first shown: the AI's version, if it has one
                 boards[c.id] = b
                 return b
             }()
@@ -519,7 +521,7 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
 
     func update(_ v: TaskView) {
         if m.sent && v.busy { sawBusy = true }
-        if m.sent && sawBusy && !v.busy {                            // Mercury answered: flip to its version
+        if m.sent && sawBusy && !v.busy {                            // the AI answered: flip to its version
             m.sent = false; sawBusy = false; m.flipped = !v.ai.isEmpty
         }
         if v.ai.isEmpty && m.flipped { m.flipped = false }
