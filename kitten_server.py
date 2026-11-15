@@ -502,8 +502,9 @@ class H(BaseHTTPRequestHandler):
         self._ok()
 
 STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
-# every OpenRouter request: only providers that keep nothing (zero data retention) and don't train on it
-PRIVATE = {"zdr": True, "data_collection": "deny"}
+# every OpenRouter request: only providers that keep nothing (zero data retention) and don't train on it,
+# fastest first (highest throughput)
+PRIVATE = {"zdr": True, "data_collection": "deny", "sort": "throughput"}
 
 def stt_api(wav_bytes, fmt="wav", verbose=False):
     """Speech to text with AssemblyAI Universal-3.6 Pro through OpenRouter (billed per second of audio).
