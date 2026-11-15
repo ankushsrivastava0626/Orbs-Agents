@@ -187,7 +187,8 @@ def speak_fish(text, cfg, my_gen):
             for part in fish_chunks(text):
                 if not still(): break
                 body = {"model": cfg.get("FISH_MODEL", "fish-audio/drama-3"), "input": part,
-                        "voice": cfg.get("FISH_VOICE", "ffe96076aeaf4da6b13b5f204ba1445b"), "response_format": "pcm"}
+                        "voice": cfg.get("FISH_VOICE", "ffe96076aeaf4da6b13b5f204ba1445b"), "response_format": "pcm",
+                        "provider": PRIVATE}
                 req = urllib.request.Request("https://openrouter.ai/api/v1/audio/speech", method="POST",
                     data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key,
                     "Content-Type": "application/json", "X-Title": "VoicePet Joe"})
@@ -500,28 +501,16 @@ class H(BaseHTTPRequestHandler):
             jobs.put((gen, body, kind, m.group(1) if m else ""))
         self._ok()
 
-STT_CLI = "/Applications/MacParakeet.app/Contents/MacOS/macparakeet-cli"
-STT_DB = os.path.join(DIR, "stt.db")      # keep voice commands out of MacParakeet's own history
-
-def trim_stt_db():
-    """MacParakeet saves every transcription in its database, and gets slower as it grows (36 s per
-    command at 5 MB, 0.3 s fresh). We don't need that history, so start a new one once it's big."""
-    try:
-        if os.path.getsize(STT_DB) > 1_500_000:
-            for ext in ("", "-wal", "-shm"):
-                if os.path.exists(STT_DB + ext): os.replace(STT_DB + ext, STT_DB + ".old" + ext)
-            print("stt: started a fresh transcription database", flush=True)
-    except OSError:
-        pass
-
 STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
+# every OpenRouter request: only providers that keep nothing (zero data retention) and don't train on it
+PRIVATE = {"zdr": True, "data_collection": "deny"}
 
 def stt_api(wav_bytes, fmt="wav", verbose=False):
     """Speech to text with AssemblyAI Universal-3.6 Pro through OpenRouter (billed per second of audio).
     No local model and no fallback: on failure it logs, shows the amber dot, and returns None."""
     import base64, urllib.request
     body = {"model": config().get("STT_MODEL", "assemblyai/universal-3-6-pro"),
-            "input_audio": {"data": base64.b64encode(wav_bytes).decode(), "format": fmt}}
+            "input_audio": {"data": base64.b64encode(wav_bytes).decode(), "format": fmt}, "provider": PRIVATE}
     if verbose: body.update(response_format="verbose_json", timestamp_granularities=["word", "segment"])
     t = time.time()
     try:
@@ -538,6 +527,54 @@ def pcm_wav(x):
     """int16 samples at 16 kHz -> WAV bytes."""
     import io, soundfile as sf
     buf = io.BytesIO(); sf.write(buf, x, 16000, subtype="PCM_16", format="WAV"); return buf.getvalue()
+
+def stt_meeting(audio, filename):
+    """Meeting audio with speaker labels: ElevenLabs Scribe v2 through OpenRouter, uploaded as a file (25 MB max,
+    so long meetings go as compressed AAC). Returns the shape the meeting code reads: transcriptSegments with
+    startMs/endMs/speakerLabel/text, speakerCount, durationMs, rawTranscript. None on failure (no fallback)."""
+    import uuid, urllib.request
+    b = uuid.uuid4().hex
+    def field(n, v): return f"--{b}\r\nContent-Disposition: form-data; name=\"{n}\"\r\n\r\n{v}\r\n".encode()
+    body = (field("model", config().get("MEETING_STT_MODEL", "elevenlabs/scribe-v2")) + field("response_format", "verbose_json")
+            + field("diarize", "true") + field("timestamp_granularities[]", "word") + field("provider", json.dumps(PRIVATE))
+            + f"--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+              f"Content-Type: application/octet-stream\r\n\r\n".encode() + audio + f"\r\n--{b}--\r\n".encode())
+    t = time.time()
+    try:
+        req = urllib.request.Request(STT_URL, method="POST", data=body, headers={"Authorization": "Bearer " + openrouter_key(),
+                                     "Content-Type": "multipart/form-data; boundary=" + b, "X-Title": "VoicePet meetings"})
+        d = json.loads(urllib.request.urlopen(req, timeout=1800).read())
+    except Exception as e:
+        msg = e.read()[:200] if hasattr(e, "read") else repr(e)[:200]
+        print("meeting stt: failed:", msg, flush=True); STATUS["problem_at"] = time.time(); return None
+    print(f"meeting stt: {d.get('duration', 0):.0f} s of audio in {time.time() - t:.1f}s, ${(d.get('usage') or {}).get('cost', 0):.4f}", flush=True)
+    segs, cur, names = [], None, {}
+    for w in d.get("words") or []:
+        if w.get("type") == "audio_event": continue
+        raw = w.get("speaker_label") if w.get("speaker_label") is not None else w.get("speaker")
+        who = names.setdefault(raw, f"Speaker {len(names) + 1}")       # speaker_0 -> Speaker 1, in order of appearance
+        st, en, word = int(w.get("start", 0) * 1000), int(w.get("end", 0) * 1000), (w.get("word") or "").strip()
+        if not word: continue
+        new_seg = (cur is None or cur["speakerLabel"] != who or st - cur["endMs"] > 1500
+                   or (cur["endMs"] - cur["startMs"] > 20000 and cur["text"][-1:] in ".?!"))
+        if new_seg:
+            cur = {"startMs": st, "endMs": en, "speakerLabel": who, "text": word}; segs.append(cur)
+        else:
+            cur["text"] += " " + word; cur["endMs"] = en
+    if not segs and (d.get("text") or "").strip():
+        segs = [{"startMs": 0, "endMs": int((d.get("duration") or 0) * 1000), "speakerLabel": "Speaker 1", "text": d["text"].strip()}]
+    return {"ok": True, "transcriptSegments": segs, "speakerCount": len(names) or (1 if segs else 0),
+            "durationMs": int((d.get("duration") or 0) * 1000), "rawTranscript": (d.get("text") or "").strip(), "model": "scribe-v2"}
+
+def meeting_audio(wav):
+    """The whole meeting, small enough to upload (25 MB): AAC at a bitrate that fits its length."""
+    import subprocess, tempfile, soundfile as sf
+    secs = sf.info(wav).duration
+    kbps = 32 if secs < 1.5 * 3600 else 24 if secs < 2 * 3600 else 16            # 16 kbps fits ~3.4 h
+    out = tempfile.NamedTemporaryFile(suffix=".m4a", delete=False, dir="/tmp").name
+    subprocess.run(["afconvert", "-f", "m4af", "-d", "aac", "-b", str(kbps * 1000), wav, out], check=True, capture_output=True)
+    try: return open(out, "rb").read()
+    finally: os.unlink(out)
 
 def transcribe(path):
     try: data = open(path, "rb").read()
@@ -1073,7 +1110,6 @@ def meeting_recover():
             print("meeting: transcribing leftover", f, flush=True)
             meeting_transcribe(f, wav)
 
-MEETING_DB = os.path.join(DIR, "meetings.db")   # its own: never shares a lock with voice commands
 meeting_lock = threading.Lock()                  # one meeting transcribed at a time
 
 def meeting_transcribe(folder, wav):
@@ -1083,13 +1119,10 @@ def meeting_transcribe(folder, wav):
     t = time.time()
     try:
         with meeting_lock:
-            out = subprocess.run(["nice", "-n", "15", STT_CLI, "transcribe", wav, "--format", "json", "--speaker-detection", "on",
-                                  "--engine", "parakeet", "--no-history", "--database", MEETING_DB],
-                                 capture_output=True, text=True, timeout=3 * 3600).stdout
-        d = json.loads(out)
-        if d.get("ok") is False:                         # e.g. disk full: keep the audio, retry on next start
-            raise RuntimeError(d.get("error", "transcription failed")[:300])
-        open(os.path.join(folder, "transcript.json"), "w").write(out)
+            d = stt_meeting(meeting_audio(wav), "meeting.m4a")
+        if not d:                                        # failed: keep the audio, retry on next start
+            raise RuntimeError("transcription failed")
+        json.dump(d, open(os.path.join(folder, "transcript.json"), "w"), indent=1)
         segs = d.get("transcriptSegments") or []
         def ts(ms, srt=False):
             s, ms = divmod(int(ms), 1000); h, s = divmod(s, 3600); m, s = divmod(s, 60)
@@ -1131,7 +1164,6 @@ def meeting_transcribe(folder, wav):
 WAV_HEADER = 44                                  # meeting_rec.py: 16 kHz mono 16-bit, samples after 44 bytes
 LIVE = {"seen": 0, "folder": "", "segs": [], "offset": WAV_HEADER, "final": False,
         "prompt": "", "ai": [], "ask": {"q": "", "a": "", "busy": False}}
-LIVE_DB = os.path.join(DIR, "meetings-live.db")
 LIVE_EVERY = 15                                  # seconds of new audio per pass
 
 def live_load(folder):
@@ -1195,21 +1227,11 @@ def live_pass(folder):
         cut = len(x) - 3 * 16000 + int(np.argmin(e)) * win + win // 2
     x = x[:cut]
     t0 = (LIVE["offset"] - WAV_HEADER) // 32                     # ms into the meeting
-    chunk = os.path.join(folder, "live-chunk.wav")
-    try:
-        pad = np.zeros(max(1, -(-len(x) // STT_PAD)) * STT_PAD, dtype=np.int16); pad[:len(x)] = x
-        sf.write(chunk, pad, 16000, subtype="PCM_16")            # whole minutes: reuses the compiled model
-        out = subprocess.run(["nice", "-n", "10", STT_CLI, "transcribe", chunk, "--format", "json", "--speaker-detection", "on",
-                              "--engine", "parakeet", "--no-history", "--database", LIVE_DB],
-                             capture_output=True, text=True, timeout=300).stdout
-        d = json.loads(out or "{}")
-    except Exception as e:
-        print("meeting board: pass failed:", repr(e), flush=True); return
-    finally:
-        try: os.remove(chunk)
-        except OSError: pass
-    if d.get("ok") is False:
-        print("meeting board: pass failed:", d.get("error", "")[:200], flush=True); return
+    if speech_seconds_pcm(x) < 0.3:                              # silence: nothing to pay for
+        LIVE["offset"] += cut * 2; live_save(folder); return
+    d = stt_meeting(pcm_wav(x), "chunk.wav")
+    if not d:
+        print("meeting board: pass failed", flush=True); return  # this audio is tried again next pass
     if LIVE["folder"] != folder or LIVE["final"]: return         # a newer meeting, or the final transcript won
     segs = d.get("transcriptSegments") or []
     if not segs and (d.get("rawTranscript") or "").strip():
@@ -1252,7 +1274,7 @@ def openrouter(messages, max_tokens=4000):
     if not key: raise RuntimeError("no OPENROUTER_API_KEY in " + env)
     req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", method="POST",
         data=json.dumps({"model": config().get("MEETING_MODEL", OPENROUTER_MODEL), "messages": messages,
-                         "max_tokens": max_tokens}).encode(),
+                         "max_tokens": max_tokens, "provider": PRIVATE}).encode(),
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Title": "VoicePet meeting board"})
     d = json.loads(urllib.request.urlopen(req, timeout=90).read())
     if d.get("error"): raise RuntimeError(str(d["error"])[:200])
