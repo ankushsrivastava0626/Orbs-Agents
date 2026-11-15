@@ -514,42 +514,36 @@ def trim_stt_db():
     except OSError:
         pass
 
-STT_PAD = 60 * 16000      # Core ML compiles Parakeet once per audio length (~27 s): every clip goes up to a whole minute
+STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 
-def padded(path):
-    """A copy of the clip with silence added up to the next whole minute, so it always reuses the compiled model."""
-    import soundfile as sf, tempfile
-    a, sr = sf.read(path, dtype="int16")
-    if a.ndim > 1: a = a[:, 0]
-    if sr != 16000: return None                       # only our own 16 kHz recordings
-    n = max(1, -(-len(a) // STT_PAD)) * STT_PAD
-    b = np.zeros(n, dtype=np.int16); b[:len(a)] = a
-    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
-    sf.write(f.name, b, 16000, subtype="PCM_16")
-    return f.name
+def stt_api(wav_bytes, fmt="wav", verbose=False):
+    """Speech to text with AssemblyAI Universal-3.6 Pro through OpenRouter (billed per second of audio).
+    No local model and no fallback: on failure it logs, shows the amber dot, and returns None."""
+    import base64, urllib.request
+    body = {"model": config().get("STT_MODEL", "assemblyai/universal-3-6-pro"),
+            "input_audio": {"data": base64.b64encode(wav_bytes).decode(), "format": fmt}}
+    if verbose: body.update(response_format="verbose_json", timestamp_granularities=["word", "segment"])
+    t = time.time()
+    try:
+        req = urllib.request.Request(STT_URL, method="POST", data=json.dumps(body).encode(),
+            headers={"Authorization": "Bearer " + openrouter_key(), "Content-Type": "application/json", "X-Title": "VoicePet"})
+        d = json.loads(urllib.request.urlopen(req, timeout=300).read())
+    except Exception as e:
+        msg = e.read()[:200] if hasattr(e, "read") else repr(e)[:200]
+        print("stt: failed:", msg, flush=True); STATUS["problem_at"] = time.time(); return None
+    if time.time() - t > 5: print(f"stt: slow transcription ({time.time() - t:.1f}s)", flush=True)
+    return d
+
+def pcm_wav(x):
+    """int16 samples at 16 kHz -> WAV bytes."""
+    import io, soundfile as sf
+    buf = io.BytesIO(); sf.write(buf, x, 16000, subtype="PCM_16", format="WAV"); return buf.getvalue()
 
 def transcribe(path):
-    import subprocess
-    trim_stt_db()
-    t = time.time()
-    try: pad = padded(path)
-    except Exception as e:
-        print("stt: couldn't pad:", repr(e)[:120], flush=True); pad = None
-    try:
-        out = subprocess.run([STT_CLI, "transcribe", pad or path, "--format", "json", "--speaker-detection", "off",
-                              "--engine", "parakeet", "--database", STT_DB],
-                             capture_output=True, text=True, timeout=120).stdout
-    except subprocess.TimeoutExpired:
-        print("stt: timed out after 120 s", flush=True); return ""
-    finally:
-        if pad:
-            try: os.unlink(pad)
-            except OSError: pass
-    if time.time() - t > 5: print(f"stt: slow transcription ({time.time() - t:.1f}s)", flush=True)
-    try:
-        return (json.loads(out).get("rawTranscript") or "").strip()
-    except Exception:
-        return ""
+    try: data = open(path, "rb").read()
+    except OSError: return ""
+    d = stt_api(data)
+    return ((d or {}).get("text") or "").strip()
 
 TMUX = "/opt/homebrew/bin/tmux"
 session_lock = threading.Lock()
@@ -679,10 +673,17 @@ NOISE = {"you", "thank you", "thanks", "uh", "um", "hmm", "mm", "ah", "oh", "yea
 
 def speech_seconds(path):
     """How much real speech is in a recording (Silero VAD, the same detector auto mode uses)."""
-    global _gate_vad
-    import torch, soundfile as sf
+    import soundfile as sf
     audio, sr = sf.read(path, dtype="float32")
     if audio.ndim > 1: audio = audio[:, 0]
+    return _voiced(audio, sr)
+
+def speech_seconds_pcm(x):
+    return _voiced(x.astype(np.float32) / 32768.0, 16000)
+
+def _voiced(audio, sr):
+    global _gate_vad
+    import torch
     with _gate_lock:
         if _gate_vad is None:
             from silero_vad import load_silero_vad
@@ -911,25 +912,9 @@ def drain_spool():
 
 drain_spool()
 threading.Thread(target=worker, daemon=True).start()
-def warm_stt():
-    """Load the speech model once at start, so your first command isn't the slow one."""
-    import tempfile, soundfile as sf
-    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
-    sf.write(f.name, np.zeros(16000, dtype=np.float32), 16000)
-    t = time.time()
-    try: transcribe(f.name)
-    finally:
-        stt_warm.set()
-        try: os.unlink(f.name)
-        except OSError: pass
-        if config().get("KEEP_RESIDENT", "off") == "on":
-            try: keep_resident.pin_files()            # a fresh compile: pin it now, not in 10 min
-            except Exception: pass
-    print(f"stt: warm ({time.time() - t:.1f}s)", flush=True)
-
 stt_warm = threading.Event()
+stt_warm.set()                                    # nothing to load: transcription is an API call
 
-threading.Thread(target=warm_stt, daemon=True).start()
 
 # ---- meetings: right Option double-tap starts/stops; mic only; transcribed with speaker labels ----
 MEETINGS = os.path.join(DIR, "meetings")
@@ -1407,29 +1392,46 @@ def task_start(cid="", new=False):
     proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
                             stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
                             start_new_session=True)
-    TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, card=c["id"], live="", proc=proc)
-    threading.Thread(target=task_live, args=(folder,), daemon=True).start()
+    TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, card=c["id"], live="", proc=proc,
+                off=WAV_HEADER, pieces=[])
+    TASK["live_thread"] = threading.Thread(target=task_live, args=(folder,), daemon=True)
+    TASK["live_thread"].start()
     print("task board: recording to", folder, "for card", c["id"], flush=True)
 
-def task_snapshot(folder):
-    """What's been said so far: a copy of the recording with its header fixed, transcribed."""
-    import shutil
-    wav, snap = os.path.join(folder, "audio.wav"), os.path.join(folder, "snap.wav")
-    try: shutil.copyfile(wav, snap)
-    except OSError: return ""
-    subprocess_repair(snap)
-    try: return transcribe(snap)
-    finally:
-        try: os.unlink(snap)
-        except OSError: pass
+def task_piece(folder, final=False):
+    """Transcribe the audio recorded since the last piece (cut at the quietest moment of its last 1.5 s,
+    so words aren't split) and add it to what's been said. Each second of audio is sent once."""
+    wav = os.path.join(folder, "audio.wav")
+    try: size = os.path.getsize(wav)
+    except OSError: return
+    end = size - (size - WAV_HEADER) % 2
+    off = TASK.get("off", WAV_HEADER)
+    if end - off < (3200 if final else 3 * 32000): return      # live: at least 3 s of new audio; at the end, any
+    with open(wav, "rb") as f:
+        f.seek(off); x = np.frombuffer(f.read(end - off), dtype="<i2")
+    cut = len(x)
+    if not final and len(x) > 2 * 16000:
+        tail = x[-24000:].astype(np.float32)
+        e = [float(np.mean(tail[i:i + 1600] ** 2)) for i in range(0, len(tail) - 1600, 1600)]
+        cut = len(x) - 24000 + int(np.argmin(e)) * 1600 + 800
+    x = x[:cut]
+    if speech_seconds_pcm(x) < (0.1 if final else 0.3): TASK["off"] = off + 2 * cut; return   # silence: nothing to pay for
+    d = stt_api(pcm_wav(x))
+    if d is None: return                                        # failed: try this audio again next pass
+    t = (d.get("text") or "").strip()
+    TASK["off"] = off + 2 * cut
+    if t:
+        prev = TASK["pieces"][-1] if TASK["pieces"] else ""
+        if prev and prev[-1] not in ".!?" and t[:1].isupper() and not t[:2].isupper():   # mid-sentence join
+            t = t[0].lower() + t[1:]
+        TASK["pieces"].append(t); TASK["live"] = " ".join(TASK["pieces"])
 
 def task_live(folder):
-    """While recording: re-read the recording every few seconds so your words show up as you say them."""
+    """While recording: every few seconds, the new audio is transcribed and added, so your words show up."""
     while TASK["recording"] and TASK["folder"] == folder:
         time.sleep(4)
         if not TASK["recording"]: break
-        t = task_snapshot(folder)
-        if TASK["recording"] and TASK["folder"] == folder and t: TASK["live"] = t
+        task_piece(folder)
 
 def task_stop():
     if not TASK["recording"]: return
@@ -1447,9 +1449,11 @@ def task_stop():
             try: os.kill(pid, signal.SIGKILL)
             except OSError: pass
         wav = os.path.join(folder, "audio.wav")
-        subprocess_repair(wav)
+        lt = TASK.get("live_thread")
+        if lt: lt.join(timeout=60)                    # let a live pass in flight finish first
         try:
-            text = transcribe(wav)
+            task_piece(folder, final=True)               # only what hasn't been transcribed yet
+            text = " ".join(TASK.get("pieces") or []).strip()
         finally:
             TASK.update(transcribing=False, live="")
         c = card(cid)
