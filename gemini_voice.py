@@ -105,13 +105,13 @@ LEVEL_CB = None   # set by the server: receives output loudness 0..1 so the pet 
 
 
 class Player:
-    """Streams 24kHz int16 PCM chunks to the speakers, sped up with pitch kept (WSOLA)."""
-    BLOCK = 2400   # 0.1s per write, so a stop takes effect quickly
+    """Streams int16 PCM chunks (24 kHz from Gemini, 44.1 kHz from Fish) to the speakers, sped up with pitch kept (WSOLA)."""
 
-    def __init__(self, speed):
+    def __init__(self, speed, rate=24000):
         self.stopped = False
+        self.BLOCK = rate // 10   # 0.1s per write, so a stop takes effect quickly
         self.tsm = wsola(channels=1, speed=speed) if speed != 1.0 else None
-        self.stream = sd.OutputStream(samplerate=24000, channels=1, dtype="float32")
+        self.stream = sd.OutputStream(samplerate=rate, channels=1, dtype="float32")
         self.stream.start()
 
     def write(self, pcm, final=False):

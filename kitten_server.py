@@ -77,11 +77,12 @@ def load_models():
     global model
     t = time.time()
     try:
-        from kittenml import KittenTTS                    # only for ENGINE=kitten; Joe speaks through Gemini
-        model = KittenTTS(MODEL_NAME)
+        if config().get("ENGINE", "fish") == "kitten":    # the old local voice; Joe speaks through Fish
+            from kittenml import KittenTTS
+            model = KittenTTS(MODEL_NAME)
     finally:
         models_ready.set()
-        print(f"local voices loaded ({time.time() - t:.1f}s)", flush=True)
+        if model is not None: print(f"local voices loaded ({time.time() - t:.1f}s)", flush=True)
 
 import keep_resident                             # pins models in RAM; off (KEEP_RESIDENT=on in config to pin again)
 if config().get("KEEP_RESIDENT", "off") == "on": keep_resident.start()
@@ -157,6 +158,66 @@ _last_out[0] = default_output_id()                      # the device PortAudio p
 
 def is_audio_error(e):
     return e is not None and "PortAudio" in repr(e)
+
+FISH_RATE = 44100                                # OpenRouter's Fish PCM: 44.1 kHz mono 16-bit
+
+def openrouter_key():
+    env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/1/.env"))
+    key = next((l.split("=", 1)[1].strip().strip('"\'') for l in open(env) if l.startswith("OPENROUTER_API_KEY=")), "")
+    if not key: raise RuntimeError("no OPENROUTER_API_KEY in " + env)
+    return key
+
+def fish_chunks(text):
+    """Joe's lines in pieces small enough to start fast: a sentence each, short ones joined (each piece is one request)."""
+    out = []
+    for snt in sentences(text) or [text]:
+        if out and len(out[-1]) < 40: out[-1] += " " + snt
+        else: out.append(snt)
+    return out
+
+def speak_fish(text, cfg, my_gen):
+    """Joe's voice: Fish Audio Drama 3 through OpenRouter, the text exactly as written (no tags, no notes).
+    The next sentence is fetched while this one plays; audio plays as it arrives. Returns True if spoken."""
+    import urllib.request
+    key = openrouter_key()
+    still = lambda: my_gen == gen
+    pieces = queue.Queue(maxsize=64)                 # audio bytes, None between sentences, "END" or an error at the end
+    def fetch():
+        try:
+            for part in fish_chunks(text):
+                if not still(): break
+                body = {"model": cfg.get("FISH_MODEL", "fish-audio/drama-3"), "input": part,
+                        "voice": cfg.get("FISH_VOICE", "ffe96076aeaf4da6b13b5f204ba1445b"), "response_format": "pcm"}
+                req = urllib.request.Request("https://openrouter.ai/api/v1/audio/speech", method="POST",
+                    data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key,
+                    "Content-Type": "application/json", "X-Title": "VoicePet Joe"})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    while still():
+                        b = r.read(8820)                 # ~0.1 s of audio
+                        if not b: break
+                        pieces.put(b)
+            pieces.put("END")
+        except Exception as e:
+            pieces.put(e)
+    threading.Thread(target=fetch, daemon=True).start()
+    player = Player(float(cfg.get("FISH_SPEED", "1.0")), rate=FISH_RATE)
+    set_tts_player(player)
+    odd = b""
+    try:
+        while True:
+            try: b = pieces.get(timeout=30)
+            except queue.Empty: raise RuntimeError("Fish sent nothing for 30 s")
+            if isinstance(b, Exception): raise b
+            if b == "END": break
+            if not still() or player.stopped: return True
+            b = odd + b
+            odd = b[len(b) - len(b) % 2:]; b = b[:len(b) - len(b) % 2]   # keep 16-bit samples whole
+            if b: player.write(b)
+        if still(): player.write(b"", final=True)
+        return True
+    finally:
+        set_tts_player(None)
+        player.close()
 
 def speak_gemini(text, kind, cfg, my_gen):
     """Gemini Live; on an audio-device error refresh devices and try once more. Returns True if spoken."""
@@ -242,6 +303,19 @@ def worker():
         cfg = config()
         engine = cfg.get("ENGINE", "gemini")
         try:
+            if engine == "fish":                     # Joe is Fish Drama 3; no backup voice
+                STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
+                try:
+                    speak_fish(text, cfg, my_gen)
+                    continue
+                except Exception as e:
+                    print("fish failed:", repr(e)[:200], flush=True)
+                # Fish failed: amber dot, and the reply shows as text on its orb so nothing is lost
+                STATUS["problem_at"] = time.time()
+                if kind == "SAY":
+                    STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
+                                                                  "text": text, "at": time.time()}])[-10:]
+                continue
             if engine != "kitten":                   # Joe is Gemini; there is no backup voice
                 if gemini_ok():
                     STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
