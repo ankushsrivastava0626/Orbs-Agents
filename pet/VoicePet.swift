@@ -38,6 +38,7 @@ struct Status: Codable {
     var last_said: [String: Caption] = [:]                // each orb's last reply, spoken or muted
     var muted = false, muted_text = "", muted_at = 0.0    // Codex: its own mute + last muted reply
     var meeting = false, meeting_started = 0.0, meeting_transcribing = false, meeting_done = "", meeting_done_at = 0.0, meeting_folder = ""
+    var stt_engine = "cloud", voice_engine = "fish"      // speech to text (cloud | local) and Joe's voice (fish | gemini)
 
     init() {}
 
@@ -71,6 +72,7 @@ struct Status: Codable {
         meeting_transcribing = g("meeting_transcribing", false)
         meeting_done = g("meeting_done", ""); meeting_done_at = g("meeting_done_at", 0.0)
         meeting_folder = g("meeting_folder", "")
+        stt_engine = g("stt_engine", "cloud"); voice_engine = g("voice_engine", "fish")
         if let p: CodexPending = g("pending", nil) { approvalId = p.request_id; approvalDetail = p.detail; approvalMethod = p.method }
     }
 }
@@ -862,6 +864,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func menuTaskBoard() { taskBoard.toggle() }
     @objc func menuResetPeek() { taskBoard.resetPeekLayout() }
     @objc func menuNewTaskCard() { taskBoard.post("/task/new") }
+    @objc func menuVoiceFish() { model.post("/settings?ENGINE=fish"); model.s.voice_engine = "fish" }
+    @objc func menuVoiceGemini() { model.post("/settings?ENGINE=gemini"); model.s.voice_engine = "gemini" }
+    @objc func menuSTTCloud() { model.post("/settings?STT_ENGINE=cloud"); model.s.stt_engine = "cloud" }
+    @objc func menuSTTLocal() { model.post("/settings?STT_ENGINE=local"); model.s.stt_engine = "local" }
 
     func toggleMeeting() {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/meeting")!)
@@ -1229,6 +1235,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.sectionHeader(title: "Voice"))
         menu.addItem(menuItem("Auto mode (hands-free)", "waveform", #selector(menuAuto), on: model.s.auto))
+        let fish = model.s.voice_engine != "gemini"
+        let voices = NSMenu(); voices.autoenablesItems = false
+        voices.addItem(menuItem("Fish Drama 3", "cloud", #selector(menuVoiceFish), on: fish, hint: "OpenRouter"))
+        voices.addItem(menuItem("Gemini", "cloud", #selector(menuVoiceGemini), on: !fish, hint: "Google"))
+        let jv = menuItem("Joe's voice", "person.wave.2", nil, hint: fish ? "Fish Drama 3" : "Gemini"); jv.submenu = voices
+        menu.addItem(jv)
+        let local = model.s.stt_engine == "local"
+        let stt = NSMenu(); stt.autoenablesItems = false
+        stt.addItem(menuItem("Cloud", "cloud", #selector(menuSTTCloud), on: !local, hint: "AssemblyAI · Scribe v2 for meetings",
+                             tip: "Nothing runs on this Mac; billed per second of audio"))
+        stt.addItem(menuItem("Local", "laptopcomputer", #selector(menuSTTLocal), on: local, hint: "Parakeet on this Mac",
+                             tip: "Free, but uses about 0.5 GB while transcribing; the first use after a restart takes ~30 s"))
+        let tr = menuItem("Transcription", "text.bubble", nil, hint: local ? "Local" : "Cloud"); tr.submenu = stt
+        menu.addItem(tr)
         menu.addItem(.sectionHeader(title: "Screen"))
         menu.addItem(menuItem("OS mode", "macwindow", #selector(menuOSMode), on: osMode.on, hint: "double-tap left ⌥"))
         menu.addItem(menuItem("Focus timer", "timer", #selector(menuPomodoro), on: !pomodoro.hidden))

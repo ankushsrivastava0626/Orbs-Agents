@@ -12,6 +12,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DIR = os.path.expanduser("~/.claude/voice")
 PORT = 5123
 
+def set_config(key, value):
+    """Change one setting in the config file, keeping its comment (or add it at the top)."""
+    path = os.path.join(DIR, "config")
+    lines = open(path).read().split("\n")
+    for i, l in enumerate(lines):
+        if re.match(rf"^{key}=", l):
+            rest = l.split("=", 1)[1]
+            cmt = rest[rest.index("#"):] if "#" in rest else ""
+            lines[i] = (f"{key}={value}".ljust(19) + " " + cmt).rstrip() if cmt else f"{key}={value}"
+            break
+    else:
+        lines.insert(0, f"{key}={value}")
+    open(path + ".tmp", "w").write("\n".join(lines)); os.replace(path + ".tmp", path)
+
 def config():
     cfg = {}
     for line in open(os.path.join(DIR, "config")):
@@ -352,6 +366,8 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         if self.path == "/status":
+            c = config()
+            STATUS.update(stt_engine=c.get("STT_ENGINE", "cloud"), voice_engine=c.get("ENGINE", "fish"))
             STATUS["resident_mb"] = round(keep_resident.stats["files_mb"] + keep_resident.stats["weights_mb"])
             self._ok(json.dumps(STATUS).encode())
         elif self.path == "/task":           # the task board polls this
@@ -433,6 +449,15 @@ class H(BaseHTTPRequestHandler):
             except Exception:
                 pass
             self._ok(json.dumps({"muted": STATUS["muted_sessions"]}).encode()); return
+        if self.path.startswith("/settings"):    # orb menu: /settings?STT_ENGINE=local, /settings?ENGINE=gemini
+            q = dict(x.split("=", 1) for x in (self.path.split("?", 1)[1] if "?" in self.path else "").split("&") if "=" in x)
+            ok = {"STT_ENGINE": ("cloud", "local"), "ENGINE": ("fish", "gemini")}
+            for k, v in q.items():
+                if v in ok.get(k, ()):
+                    set_config(k, v)
+                    print(f"settings: {k} = {v}", flush=True)
+                    if k == "STT_ENGINE" and v == "local": threading.Thread(target=warm_local, daemon=True).start()
+            self._ok(json.dumps({k: config().get(k) for k in ok}).encode()); return
         if self.path.startswith("/task/"):       # task boards: record / new / ask the AI / edit / delete / hide / show all
             try: ev = json.loads(body or "{}")
             except Exception: ev = {}
@@ -577,11 +602,100 @@ def meeting_audio(wav):
     try: return open(out, "rb").read()
     finally: os.unlink(out)
 
+# ---- local speech to text (Parakeet through MacParakeet, on this Mac): picked in the orb menu, never a fallback ----
+STT_CLI = "/Applications/MacParakeet.app/Contents/MacOS/macparakeet-cli"
+STT_DB = os.path.join(DIR, "stt.db")             # keep voice commands out of MacParakeet's own history
+MEETING_DB = os.path.join(DIR, "meetings.db")    # its own: never shares a lock with voice commands
+LIVE_DB = os.path.join(DIR, "meetings-live.db")
+STT_PAD = 60 * 16000      # Core ML compiles Parakeet once per audio length (~27 s): short clips go up to a whole minute
+
+def stt_local():
+    return config().get("STT_ENGINE", "cloud") == "local"
+
+def trim_stt_db():
+    """MacParakeet saves every transcription in its database and slows down as it grows: start a fresh one when big."""
+    try:
+        if os.path.getsize(STT_DB) > 1_500_000:
+            for ext in ("", "-wal", "-shm"):
+                if os.path.exists(STT_DB + ext): os.replace(STT_DB + ext, STT_DB + ".old" + ext)
+    except OSError:
+        pass
+
+def local_cli(path, speakers=False, db=STT_DB, nice=0, timeout=120):
+    """Parakeet on a 16 kHz WAV. Clips under 10 min are padded to whole minutes so Core ML reuses its compiled
+    model. Returns MacParakeet's JSON (transcriptSegments, rawTranscript, …) or None on failure."""
+    import subprocess, tempfile, soundfile as sf
+    pad = None
+    try:
+        info = sf.info(path)
+        if info.samplerate == 16000 and info.duration < 600:
+            a, _ = sf.read(path, dtype="int16")
+            if a.ndim > 1: a = a[:, 0]
+            b = np.zeros(max(1, -(-len(a) // STT_PAD)) * STT_PAD, dtype=np.int16); b[:len(a)] = a
+            pad = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp").name
+            sf.write(pad, b, 16000, subtype="PCM_16")
+    except Exception as e:
+        print("stt (local): couldn't pad:", repr(e)[:120], flush=True)
+    if db == STT_DB: trim_stt_db()
+    args = (["nice", "-n", str(nice)] if nice else []) + [STT_CLI, "transcribe", pad or path, "--format", "json",
+            "--speaker-detection", "on" if speakers else "off", "--engine", "parakeet", "--database", db]
+    if db != STT_DB: args.append("--no-history")
+    t = time.time()
+    try:
+        out = subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout
+        d = json.loads(out)
+    except Exception as e:
+        print("stt (local): failed:", repr(e)[:200], flush=True); STATUS["problem_at"] = time.time(); return None
+    finally:
+        if pad:
+            try: os.unlink(pad)
+            except OSError: pass
+    if d.get("ok") is False:
+        print("stt (local): failed:", str(d.get("error"))[:200], flush=True); STATUS["problem_at"] = time.time(); return None
+    if time.time() - t > 5: print(f"stt (local): slow transcription ({time.time() - t:.1f}s)", flush=True)
+    return d
+
+def local_pcm(x, **kw):
+    """local_cli on int16 samples."""
+    import tempfile, soundfile as sf
+    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp").name
+    sf.write(f, x, 16000, subtype="PCM_16")
+    try: return local_cli(f, **kw)
+    finally:
+        try: os.unlink(f)
+        except OSError: pass
+
+def warm_local():
+    """First use after a restart compiles the model (~30 s): do it now, not on your first command."""
+    import tempfile, soundfile as sf
+    f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp").name
+    sf.write(f, np.zeros(16000, dtype=np.int16), 16000, subtype="PCM_16")
+    t = time.time()
+    try: local_cli(f)
+    finally:
+        try: os.unlink(f)
+        except OSError: pass
+    print(f"stt (local): warm ({time.time() - t:.1f}s)", flush=True)
+
+# ---- whichever engine is picked ----
 def transcribe(path):
+    if stt_local():
+        return ((local_cli(path) or {}).get("rawTranscript") or "").strip()
     try: data = open(path, "rb").read()
     except OSError: return ""
     d = stt_api(data)
     return ((d or {}).get("text") or "").strip()
+
+def stt_text_pcm(x):
+    """Text for int16 samples, or None on failure."""
+    d = local_pcm(x) if stt_local() else stt_api(pcm_wav(x))
+    if d is None: return None
+    return (d.get("rawTranscript" if stt_local() else "text") or "").strip()
+
+def meeting_chunk(x):
+    """Speaker-labelled lines for a live meeting chunk (both engines give the same shape)."""
+    if stt_local(): return local_pcm(x, speakers=True, db=LIVE_DB, nice=10, timeout=300)
+    return stt_meeting(pcm_wav(x), "chunk.wav")
 
 TMUX = "/opt/homebrew/bin/tmux"
 session_lock = threading.Lock()
@@ -951,7 +1065,8 @@ def drain_spool():
 drain_spool()
 threading.Thread(target=worker, daemon=True).start()
 stt_warm = threading.Event()
-stt_warm.set()                                    # nothing to load: transcription is an API call
+stt_warm.set()                                    # cloud: nothing to load; local: warmed in the background below
+if config().get("STT_ENGINE", "cloud") == "local": threading.Thread(target=warm_local, daemon=True).start()
 
 
 # ---- meetings: right Option double-tap starts/stops; mic only; transcribed with speaker labels ----
@@ -1120,7 +1235,8 @@ def meeting_transcribe(folder, wav):
     t = time.time()
     try:
         with meeting_lock:
-            d = stt_meeting(meeting_audio(wav), "meeting.m4a")
+            d = (local_cli(wav, speakers=True, db=MEETING_DB, nice=15, timeout=3 * 3600) if stt_local()
+                 else stt_meeting(meeting_audio(wav), "meeting.m4a"))
         if not d:                                        # failed: keep the audio, retry on next start
             raise RuntimeError("transcription failed")
         json.dump(d, open(os.path.join(folder, "transcript.json"), "w"), indent=1)
@@ -1230,7 +1346,7 @@ def live_pass(folder):
     t0 = (LIVE["offset"] - WAV_HEADER) // 32                     # ms into the meeting
     if speech_seconds_pcm(x) < 0.3:                              # silence: nothing to pay for
         LIVE["offset"] += cut * 2; live_save(folder); return
-    d = stt_meeting(pcm_wav(x), "chunk.wav")
+    d = meeting_chunk(x)
     if not d:
         print("meeting board: pass failed", flush=True); return  # this audio is tried again next pass
     if LIVE["folder"] != folder or LIVE["final"]: return         # a newer meeting, or the final transcript won
@@ -1439,9 +1555,8 @@ def task_piece(folder, final=False):
         cut = len(x) - 24000 + int(np.argmin(e)) * 1600 + 800
     x = x[:cut]
     if speech_seconds_pcm(x) < (0.1 if final else 0.3): TASK["off"] = off + 2 * cut; return   # silence: nothing to pay for
-    d = stt_api(pcm_wav(x))
-    if d is None: return                                        # failed: try this audio again next pass
-    t = (d.get("text") or "").strip()
+    t = stt_text_pcm(x)
+    if t is None: return                                        # failed: try this audio again next pass
     TASK["off"] = off + 2 * cut
     if t:
         prev = TASK["pieces"][-1] if TASK["pieces"] else ""
