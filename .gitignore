@@ -23,3 +23,11 @@ meetings/
 meetings.db*
 tasks/
 agents/
+stt.db.*
+meetings-live.db*
+last_said.json
+sessions.json.broken
+.launch.lock
+prompts/
+samples/
+.DS_Store
