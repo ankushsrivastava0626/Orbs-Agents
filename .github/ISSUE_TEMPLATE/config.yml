@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/ankushsrivastava0626/Orbs-Agents/security/policy
+    about: Please report vulnerabilities privately, not as issues.
+  - name: Read the docs
+    url: https://github.com/ankushsrivastava0626/Orbs-Agents/tree/main/docs
+    about: Install, settings, how it's built, and troubleshooting.

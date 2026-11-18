@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-labelledby="title desc">
+  <title id="title">Orbs Agents</title>
+  <desc id="desc">An orb cycles through a voice command: listening (red), transcribing (coral, spinning arc), sent (green), working (purple, spinning arc) and Joe speaking the reply (blue ripples). Beside it, a row of agent orbs: Claude Code, OpenRouter, Codex, auto mode and notes mode.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0c0f16"/>
+      <stop offset="1" stop-color="#161a26"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="shine" cx="0.38" cy="0.3" r="0.55">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="g-red"><stop offset="0" stop-color="#ff454d" stop-opacity=".95"/><stop offset="1" stop-color="#ff454d" stop-opacity=".35"/></radialGradient>
+    <radialGradient id="g-coral"><stop offset="0" stop-color="#ff8061" stop-opacity=".95"/><stop offset="1" stop-color="#ff8061" stop-opacity=".35"/></radialGradient>
+    <radialGradient id="g-green"><stop offset="0" stop-color="#33d973" stop-opacity=".95"/><stop offset="1" stop-color="#33d973" stop-opacity=".35"/></radialGradient>
+    <radialGradient id="g-purple"><stop offset="0" stop-color="#a666ff" stop-opacity=".95"/><stop offset="1" stop-color="#a666ff" stop-opacity=".35"/></radialGradient>
+    <radialGradient id="g-blue"><stop offset="0" stop-color="#4099ff" stop-opacity=".95"/><stop offset="1" stop-color="#4099ff" stop-opacity=".35"/></radialGradient>
+    <radialGradient id="g-slate"><stop offset="0" stop-color="#8c99bf" stop-opacity=".95"/><stop offset="1" stop-color="#8c99bf" stop-opacity=".35"/></radialGradient>
+    <radialGradient id="g-rose"><stop offset="0" stop-color="#ff8cbf" stop-opacity=".95"/><stop offset="1" stop-color="#ff8cbf" stop-opacity=".35"/></radialGradient>
+    <radialGradient id="g-amber"><stop offset="0" stop-color="#ffba4d" stop-opacity=".95"/><stop offset="1" stop-color="#ffba4d" stop-opacity=".35"/></radialGradient>
+    <filter id="blur" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="12"/></filter>
+    <filter id="blur-s" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="4"/></filter>
+  </defs>
+  <style>
+    text{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Helvetica,Arial,sans-serif}
+    .title{font-size:58px;font-weight:700;fill:#f3f5fa;letter-spacing:-1.5px}
+    .tag{font-size:24px;font-weight:500;fill:#b3bbcf}
+    .sub{font-size:16px;fill:#7f889e}
+    .lbl{font-size:12px;fill:#7f889e;text-anchor:middle}
+    .cap{font-size:17px;font-weight:500;fill:#d4d9e6;text-anchor:middle;opacity:0}
+    .big{transform-box:view-box;transform-origin:730px 162px}
+    .s{opacity:0}
+    .s-red,.c-red{animation:w-red 10s linear infinite}
+    .s-coral,.c-coral{animation:w-coral 10s linear infinite}
+    .s-green,.c-green{animation:w-green 10s linear infinite}
+    .s-purple,.c-purple{animation:w-purple 10s linear infinite}
+    .s-blue,.c-blue{animation:w-blue 10s linear infinite}
+    .s-slate,.c-slate{animation:w-slate 10s linear infinite}
+    .arcw{opacity:0;animation:w-arc 10s linear infinite}
+    .ripw{opacity:0;animation:w-blue 10s linear infinite}
+    .spin{animation:spin 1.1s linear infinite}
+    .pulse{animation:pulse .6s ease-in-out infinite alternate}
+    .rip{animation:rip 1.6s ease-out infinite}
+    .rip2{animation-delay:.8s}
+    .breathe{animation:breathe 3.2s ease-in-out infinite}
+    .d1{animation-delay:.6s}.d2{animation-delay:1.2s}.d3{animation-delay:1.8s}.d4{animation-delay:2.4s}
+    .mini{transform-box:fill-box;transform-origin:center}
+    @keyframes w-red{0%,19%{opacity:1}21%,98%{opacity:0}100%{opacity:1}}
+    @keyframes w-coral{0%,19%{opacity:0}21%,35%{opacity:1}37%,100%{opacity:0}}
+    @keyframes w-green{0%,35%{opacity:0}37%,43%{opacity:1}45%,100%{opacity:0}}
+    @keyframes w-purple{0%,43%{opacity:0}45%,73%{opacity:1}75%,100%{opacity:0}}
+    @keyframes w-blue{0%,73%{opacity:0}75%,93%{opacity:1}95%,100%{opacity:0}}
+    @keyframes w-slate{0%,93%{opacity:0}95%,98%{opacity:1}100%{opacity:0}}
+    @keyframes w-arc{0%,19%{opacity:0}21%,35%{opacity:1}37%,43%{opacity:0}45%,73%{opacity:1}75%,100%{opacity:0}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes pulse{from{transform:scale(1)}to{transform:scale(1.06)}}
+    @keyframes rip{0%{transform:scale(1);opacity:.75}100%{transform:scale(1.8);opacity:0}}
+    @keyframes breathe{0%,100%{opacity:.72}50%{opacity:1}}
+    @media (prefers-reduced-motion:reduce){
+      *{animation:none!important}
+      .s-purple,.c-purple,.arcw{opacity:1}
+    }
+  </style>
+
+  <rect width="960" height="360" rx="22" fill="url(#bg)"/>
+  <rect x=".5" y=".5" width="959" height="359" rx="21.5" fill="none" stroke="#ffffff" stroke-opacity=".07"/>
+  <circle cx="730" cy="162" r="170" fill="url(#aura)"/>
+
+  <!-- left: name and pitch -->
+  <text class="title" x="62" y="128">Orbs Agents</text>
+  <text class="tag" x="64" y="172">Talk to your coding agents.</text>
+  <text class="sub" x="64" y="202">One orb per Claude Code, Codex or OpenRouter session.</text>
+  <text class="sub" x="64" y="226">Hold its number key, speak, let go. Joe reads the reply.</text>
+
+  <!-- left: a small fleet -->
+  <g transform="translate(0 282)">
+    <g class="breathe"><circle cx="84" cy="0" r="13" fill="#8c99bf" opacity=".55" filter="url(#blur-s)"/><circle cx="84" cy="0" r="12" fill="url(#g-slate)"/></g>
+    <g class="breathe d1"><circle cx="170" cy="0" r="13" fill="#ff8cbf" opacity=".55" filter="url(#blur-s)"/><circle cx="170" cy="0" r="12" fill="url(#g-rose)"/></g>
+    <g class="breathe d2"><circle cx="256" cy="0" r="13" fill="#ffba4d" opacity=".55" filter="url(#blur-s)"/><circle cx="256" cy="0" r="12" fill="url(#g-amber)"/></g>
+    <g class="breathe d3"><circle cx="342" cy="0" r="12" fill="url(#g-slate)"/><circle cx="342" cy="0" r="16.5" fill="none" stroke="#33e6d9" stroke-width="2"/></g>
+    <g class="breathe d4"><circle cx="428" cy="0" r="12" fill="url(#g-slate)"/><circle cx="428" cy="0" r="16.5" fill="none" stroke="#ffd133" stroke-width="2" stroke-dasharray="3.2 3.2"/></g>
+    <text class="lbl" x="84" y="38">Claude Code</text>
+    <text class="lbl" x="170" y="38">OpenRouter</text>
+    <text class="lbl" x="256" y="38">Codex</text>
+    <text class="lbl" x="342" y="38">auto mode</text>
+    <text class="lbl" x="428" y="38">notes</text>
+  </g>
+
+  <!-- right: one orb living through a command -->
+  <g class="ripw"><circle class="big rip" cx="730" cy="162" r="60" fill="none" stroke="#4099ff" stroke-width="2"/><circle class="big rip rip2" cx="730" cy="162" r="60" fill="none" stroke="#4099ff" stroke-width="2"/></g>
+  <g class="s s-red"><g class="big pulse"><circle cx="730" cy="162" r="60" fill="#ff454d" opacity=".75" filter="url(#blur)"/><circle cx="730" cy="162" r="60" fill="url(#g-red)"/></g></g>
+  <g class="s s-coral"><circle cx="730" cy="162" r="60" fill="#ff8061" opacity=".75" filter="url(#blur)"/><circle cx="730" cy="162" r="60" fill="url(#g-coral)"/></g>
+  <g class="s s-green"><circle cx="730" cy="162" r="60" fill="#33d973" opacity=".75" filter="url(#blur)"/><circle cx="730" cy="162" r="60" fill="url(#g-green)"/></g>
+  <g class="s s-purple"><circle cx="730" cy="162" r="60" fill="#a666ff" opacity=".75" filter="url(#blur)"/><circle cx="730" cy="162" r="60" fill="url(#g-purple)"/></g>
+  <g class="s s-blue"><circle cx="730" cy="162" r="60" fill="#4099ff" opacity=".75" filter="url(#blur)"/><circle cx="730" cy="162" r="60" fill="url(#g-blue)"/></g>
+  <g class="s s-slate"><circle cx="730" cy="162" r="60" fill="#8c99bf" opacity=".45" filter="url(#blur)"/><circle cx="730" cy="162" r="60" fill="url(#g-slate)"/></g>
+  <circle cx="730" cy="162" r="60" fill="url(#shine)"/>
+  <g class="arcw"><g class="big spin"><circle cx="730" cy="162" r="69" fill="none" stroke="#ffffff" stroke-opacity=".85" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="108 326"/></g></g>
+
+  <text class="cap c-red" x="730" y="300">Holding 1 · listening…</text>
+  <text class="cap c-coral" x="730" y="300">Transcribing…</text>
+  <text class="cap c-green" x="730" y="300">Sent to Claude Code</text>
+  <text class="cap c-purple" x="730" y="300">Working · Editing Sessions.swift</text>
+  <text class="cap c-blue" x="730" y="300">Joe: “All done, sir. The tests pass.”</text>
+  <text class="cap c-slate" x="730" y="300">Ready when you are</text>
+</svg>

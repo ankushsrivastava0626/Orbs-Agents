@@ -1,0 +1,27 @@
+name: App
+on:
+  push:
+    branches: [main]
+    paths: ["pet/**", ".github/workflows/app.yml"]
+  pull_request:
+    paths: ["pet/**", ".github/workflows/app.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Build VoicePet.app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Use the newest Xcode on the runner
+        run: |
+          x=$(ls -d /Applications/Xcode_*.app | grep -vi beta | sort -V | tail -1)
+          sudo xcode-select -s "$x/Contents/Developer"
+          swiftc --version
+      - name: Build
+        run: pet/build.sh
+      - name: Check the app
+        run: |
+          codesign --verify --verbose pet/VoicePet.app
+          file pet/VoicePet.app/Contents/MacOS/VoicePet

@@ -1,0 +1,29 @@
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lint:
+    name: Python, shell and JSON
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Python compiles
+        run: python3 -m py_compile *.py
+      - name: Shell scripts parse
+        run: |
+          for f in *.sh speak toggle mute osmode tunnel attach-voice.command pet/build.sh tests/smoke.sh config.example; do
+            bash -n "$f"; echo "ok  $f"
+          done
+      - name: JSON is valid
+        run: |
+          for f in voice-hooks.json voice-mcp.json; do python3 -m json.tool "$f" > /dev/null; echo "ok  $f"; done
+      - name: No personal files are tracked
+        run: |
+          if git ls-files | grep -E '(^|/)(\.env|config|orbs\.json|sessions?\.json|last_said\.json|stt\.db.*|meetings.*\.db.*)$'; then
+            echo "These files hold personal data and must stay out of git."; exit 1
+          fi

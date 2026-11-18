@@ -1,0 +1,16 @@
+name: Idea
+description: Suggest something new, or a better way to do something
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: What you want to do, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could it work?
+      description: Keys, orb colors, menus, whatever you picture.
