@@ -689,7 +689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         m.onVisibility = { [weak self, weak p] on in
             guard let self, let p else { return }
             self.placeBubble(session)
-            p.ignoresMouseEvents = !on
+            if !on { p.ignoresMouseEvents = true }                       // clicks are let in only over the cards
             if on { p.orderFrontRegardless() }
         }
         bubbles[session] = (m, p)
@@ -850,8 +850,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.main.add(optTimer!, forMode: .common)
     }
 
+    /// A bubble's panel is 440×520 but its cards are only as tall as their text: take clicks only over the cards
+    /// (the whole panel used to swallow clicks over the strip for 10–25 s after every hover).
+    private var bubbleHitTick = 0
+    private func updateBubbleHitAreas() {
+        let p = NSEvent.mouseLocation
+        for (m, panel) in bubbles.values where panel.isVisible {
+            let band = NSRect(x: panel.frame.minX, y: panel.frame.minY, width: panel.frame.width, height: m.contentHeight + 14)
+            let over = !m.cards.isEmpty && band.contains(p)
+            if panel.ignoresMouseEvents == over { panel.ignoresMouseEvents = !over }
+        }
+    }
+
     private func watchOption() {
         sessions.releaseIfLifted()                                   // a hold whose key-up the tap missed
+        bubbleHitTick += 1
+        if bubbleHitTick % 8 == 0 { updateBubbleHitAreas() }         // ~15×/s
         let f = CGEventSource.flagsState(.hidSystemState).rawValue
         let leftOpt = f & 0x00080000 != 0 && f & 0x20 != 0          // Option mask + left-Alt device bit
         let others = f & (0x00100000 | 0x00040000 | 0x00020000) != 0 // ⌘ ⌃ ⇧ held: not a plain tap

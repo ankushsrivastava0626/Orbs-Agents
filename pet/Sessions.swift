@@ -28,6 +28,7 @@ struct OrbEntry: Codable, Equatable {
     var hotkey: Hotkey? = nil // speak hotkey you set; nil = the default for its position
     var closed: Bool? = nil   // you closed it: don't relaunch it automatically
     var command: String? = nil // custom launch command ("claude-openrouter --model …"); kept when we rewrite the file
+    var agent: String? = nil   // a CUE Studio agent this orb runs as (the launcher sets it)
 }
 
 /// A hold-to-talk key. Modifiers are side-specific (left ⌥ ≠ right ⌥). code -1 = no hotkey.
@@ -123,6 +124,7 @@ final class SessionsController: NSObject {
     // MARK: orbs file (written by the launcher for Claude sessions, by us for Codex sessions)
 
     func load() {
+        guard dock?.draggingId == nil else { return }               // mid-drag: the file still has the old order
         var list = (try? JSONDecoder().decode([OrbEntry].self, from: Data(contentsOf: URL(fileURLWithPath: orbsPath)))) ?? []
         list.removeAll { $0.closed == true || ($0.kind == "claude" && $0.id.isEmpty) }   // no permanent default orb
         if list != entries {
@@ -131,8 +133,33 @@ final class SessionsController: NSObject {
         }
     }
 
+    private var dropped: Set<String> = []        // orbs you closed: taken out of the file at the next save
+
+    /// Merge our changes into orbs.json under the launcher's lock: the launcher owns each Claude orb's conversation
+    /// (id, folder, command, agent; it may have just changed them), we own the order, hotkeys and Codex orbs.
+    /// Fields we don't know are kept, and the file is swapped in whole.
     private func save() {
-        if let d = try? JSONEncoder().encode(entries) { try? d.write(to: URL(fileURLWithPath: orbsPath)) }
+        let fd = Darwin.open(NSHomeDirectory() + "/.claude/voice/.launch.lock", O_CREAT | O_RDWR, 0o644)
+        if fd >= 0 { flock(fd, LOCK_EX) }
+        defer { if fd >= 0 { flock(fd, LOCK_UN); Darwin.close(fd) } }
+        let url = URL(fileURLWithPath: orbsPath)
+        let onDisk = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [[String: Any]]) ?? []
+        var byName: [String: [String: Any]] = [:]
+        for o in onDisk { if let n = o["name"] as? String { byName[n] = o } }
+        var out: [[String: Any]] = []
+        for e in entries {
+            let mine = ((try? JSONEncoder().encode(e)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]) ?? [:]
+            var o = byName.removeValue(forKey: e.name) ?? [:]
+            if o.isEmpty || e.kind == "codex" { for (k, v) in mine { o[k] = v } }
+            else { for k in ["hotkey", "closed"] { o[k] = mine[k] } }
+            out.append(o)
+        }
+        for o in onDisk {                                         // orbs the launcher added since we last looked
+            guard let n = o["name"] as? String, byName[n] != nil, !dropped.contains(n) else { continue }
+            out.append(o)
+        }
+        dropped = []
+        if let d = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted]) { try? d.write(to: url, options: .atomic) }
         dock?.orbIds = entries.map(\.name)
     }
 
@@ -553,9 +580,9 @@ final class SessionsController: NSObject {
                 OrbAnchors.shared.screenRect(e.name).map { (e.name, $0) } })      // slots as they were
         case 1:
             let others = entries.map(\.name).filter { $0 != name }
-            let slots = entries.compactMap { dragFrames[$0.name]?.midX }.sorted()
-            guard !slots.isEmpty else { return }
-            let target = slots.filter { $0 < p.x }.count                          // which slot the cursor is over
+            // the other orbs' places only (counting its own put it one slot too far: a 5 px nudge swapped it)
+            let slots = others.compactMap { dragFrames[$0]?.midX }.sorted()
+            let target = slots.filter { $0 < p.x }.count                          // how many orbs end up left of it
             var order = others
             order.insert(name, at: min(max(target, 0), order.count))
             if order != entries.map(\.name) {
@@ -616,13 +643,15 @@ final class SessionsController: NSObject {
     }
 
 
+    private var launching: Set<String> = []      // names given to orbs still starting (not in orbs.json yet)
+    private func taken(_ n: String) -> Bool { entries.contains { $0.name == n } || launching.contains(n) }
     private func nextName(_ base: String) -> String {
         var i = 2
-        while entries.contains(where: { $0.name == "\(base)-\(i)" }) { i += 1 }
+        while taken("\(base)-\(i)") { i += 1 }
         return "\(base)-\(i)"
     }
 
-    private func newClaudeName() -> String { entries.contains { $0.name == "voice" } ? nextName("voice") : "voice" }
+    private func newClaudeName() -> String { taken("voice") ? nextName("voice") : "voice" }
     @objc func newClaude() { startClaude(newClaudeName(), ["--fresh"]) }
 
     /// Agents exported from CUE Studio (~/.claude/voice/agents/<slug>/agent.json): (slug, name, model, engine), by name.
@@ -672,9 +701,10 @@ final class SessionsController: NSObject {
     }
 
     private func startClaude(_ name: String, _ args: [String]) {
+        launching.insert(name)                                        // a second quick "new" must pick another name
         DispatchQueue.global().async {
             _ = self.app?.run(self.launcher, ["--name", name] + args)
-            DispatchQueue.main.async { self.load(); self.select(name) }
+            DispatchQueue.main.async { self.load(); self.launching.remove(name); self.select(name) }
         }
     }
 
@@ -799,6 +829,7 @@ final class SessionsController: NSObject {
         if e.kind == "claude" { post5123("/claude/quit?s=\(n)", [:]) }
         if e.kind == "codex", codex.s.thread_id == e.id { codexPost("/stop", [:]) }
         entries.removeAll { $0.name == n }                            // every orb is removable
+        dropped.insert(n)
         save()
         if main.s.target == n, let first = entries.first { select(first.name) }
     }

@@ -144,8 +144,16 @@ final class TypeBox {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/type")!)
         req.httpMethod = "POST"; req.timeoutInterval = 3
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["name": t.name, "kind": t.kind, "text": text])
-        URLSession.shared.dataTask(with: req).resume()
-        m.text = ""; drafts[t.name] = nil
+        drafts[t.name] = text                                         // kept until the server has it
+        URLSession.shared.dataTask(with: req) { [weak self] _, resp, err in
+            let ok = err == nil && (resp as? HTTPURLResponse)?.statusCode == 200
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if ok { if self.drafts[t.name] == text { self.drafts[t.name] = nil } }
+                else { NSSound.beep() }                                  // not sent (server restarting): the draft stays
+            }
+        }.resume()
+        m.text = ""
         close()
     }
 }

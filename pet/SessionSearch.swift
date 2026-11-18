@@ -27,6 +27,7 @@ final class SessionSearchModel: ObservableObject {
     @Published var shown = false
     @Published var searching = false
     @Published var stale = false                // the results shown are for an older search
+    var pickWhenReady = false                   // Return while searching: open the first result once it's in
     @Published var folder: String? = nil        // browsing: inside this folder
     @Published var model: String? = nil         // browsing: this model, inside the folder
     var openIds: Set<String> = []                   // conversations already showing as an orb
@@ -78,7 +79,10 @@ struct SessionSearchView: View {
                     .font(.system(size: 15, design: .rounded))
                     .foregroundColor(.white)
                     .focused($focused)
-                    .onSubmit { let rs = m.rows; pick(rs.first { $0.id == m.selectedId } ?? rs.first) }
+                    .onSubmit {
+                        if m.stale { m.pickWhenReady = true; return }       // still searching: open the new results' first
+                        let rs = m.rows; pick(rs.first { $0.id == m.selectedId } ?? rs.first)
+                    }
                 if m.searching { ProgressView().controlSize(.small).colorScheme(.dark) }
             }
             .padding(.horizontal, 16).padding(.vertical, 13)
@@ -264,6 +268,9 @@ final class SessionSearch {
                     self.m.hits = hits
                     let rs = self.m.rows
                     if !rs.contains(where: { $0.id == self.m.selectedId }) { self.m.selectedId = rs.first?.id }
+                    if self.m.pickWhenReady, let first = rs.first, first.hit != nil {   // Return was pressed mid-search
+                        self.m.pickWhenReady = false; self.m.onPick?(first.hit!)
+                    }
                 }
             }
         }

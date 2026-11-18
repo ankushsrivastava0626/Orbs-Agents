@@ -91,7 +91,7 @@ struct RightClickReader: NSViewRepresentable {
         override func mouseDragged(with e: NSEvent) {
             guard let d = downAt, onDrag != nil else { return }
             let p = NSEvent.mouseLocation
-            if !dragging, hypot(p.x - d.x, p.y - d.y) > 4 { dragging = true; onDrag?(0, p) }
+            if !dragging, hypot(p.x - d.x, p.y - d.y) > 10 { dragging = true; onDrag?(0, p) }   // a shaky click stays a click
             if dragging { onDrag?(1, p) }
         }
         override func mouseUp(with e: NSEvent) {

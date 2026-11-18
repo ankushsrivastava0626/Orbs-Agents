@@ -23,6 +23,7 @@ final class CaptionsModel: ObservableObject {
     @Published var cards: [ReplyCard] = []
     @Published var hovering = false
     @Published var tailX: CGFloat? = nil       // where (in the panel) its orb is, for the bubble tail
+    var contentHeight: CGFloat = 0             // how tall the cards are (the rest of the panel lets clicks through)
     private var seen = Set<String>()
     private var timer: Timer?
     var onVisibility: ((Bool) -> Void)?
@@ -172,6 +173,8 @@ struct ReplyCardView: View {
             RoundedRectangle(cornerRadius: 16).fill(Color(white: 0.07).opacity(0.94))
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.10), lineWidth: 1))
                 .shadow(color: .black.opacity(0.55), radius: 14, y: 4))
+        .contentShape(RoundedRectangle(cornerRadius: 16))
+        .onTapGesture(perform: dismiss)                                  // click a card to put it away
         .overlay(alignment: .bottomLeading) {
             if showTail, tailX != nil {                                // speech-bubble tail pointing at its orb
                 let x = tailLocal
@@ -204,11 +207,15 @@ struct CaptionsView: View {
     var body: some View {
         VStack(alignment: .center, spacing: 8) {
             Spacer(minLength: 0)
-            ForEach(m.cards) { c in
-                ReplyCardView(card: c, tailX: m.tailX, showTail: c.id == m.cards.last?.id) { m.dismiss(c.id) }
+            VStack(alignment: .center, spacing: 8) {
+                ForEach(m.cards) { c in
+                    ReplyCardView(card: c, tailX: m.tailX, showTail: c.id == m.cards.last?.id) { m.dismiss(c.id) }
+                }
             }
+            .background(GeometryReader { g in Color.clear.onAppear { m.contentHeight = g.size.height }
+                                                       .onChange(of: g.size.height) { m.contentHeight = $0 } })
+            .onHover { m.hovering = $0 }                                   // only the cards keep it up, not the empty space
         }
         .frame(width: 440, height: 520, alignment: .bottom)
-        .onHover { m.hovering = $0 }
     }
 }
