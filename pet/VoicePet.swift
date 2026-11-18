@@ -6,7 +6,11 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
-struct SessState: Codable { var state = "idle", step = "", at = 0.0 }
+struct SessState: Codable {
+    var state = "idle", step = "", at = 0.0
+    var since: Double? = nil                     // when this run of work started
+    var steps: [String]? = nil                   // its last few steps, oldest first (the last is what it's doing now)
+}
 struct Caption: Codable, Equatable, Identifiable {
     var id = "", session = "", text = "", at = 0.0
     var sid: String? = nil                       // the conversation that said it (orb names get reused)
@@ -627,6 +631,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if let n = (n.object as? String) ?? self.sessions.firstName { self.sessions.openTyping(n) }
         }
+        // act as if an orb is hovered, from scripts (to test hover cards):  object = "voice-2:on" / "voice-2:off"
+        DistributedNotificationCenter.default().addObserver(forName: .init("com.claude.voicepet.hover"),
+                                                            object: nil, queue: .main) { [weak self] n in
+            guard let self, let o = n.object as? String, let i = o.lastIndex(of: ":") else { return }
+            self.peekBubble(String(o[..<i]), o[o.index(after: i)...] == "on")
+        }
         // toggle tunnel vision from scripts/hotkeys:  ~/.claude/voice/tunnel [on|off]
         DistributedNotificationCenter.default().addObserver(forName: .init("com.claude.voicepet.tunnel"),
                                                             object: nil, queue: .main) { [weak self] n in
@@ -670,20 +680,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hoverWork: [String: DispatchWorkItem] = [:]
 
-    /// Show an orb's last reply only once the cursor has rested on it (not while just passing over).
+    private var hovered: String? = nil           // the orb under the pointer (its busy card follows it live)
+
+    /// Hovering an orb: if it's busy (purple: working, coral: transcribing), what it's doing, live, for as long as
+    /// you hover; otherwise its last reply.
     func peekBubble(_ session: String, _ on: Bool) {
         hoverWork[session]?.cancel()
-        guard let (m, _) = bubbles[session] else { return }
+        guard let (m, _) = bubbles[session] else {
+            FileHandle.standardError.write("hover: no bubble for \(session)\n".data(using: .utf8)!); return
+        }
         if on {
             let w = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                for (other, (om, _)) in self.bubbles where other != session { om.dismissPeeks() }   // one hover bubble at a time
-                self.placeBubble(session); m.peek(true)
+                for (other, (om, _)) in self.bubbles where other != session { om.dismissPeeks(); om.showActivity(nil) }   // one at a time
+                self.hovered = session
+                self.placeBubble(session)
+                if let a = self.activity(for: session) { m.showActivity(a) } else { m.peek(true) }
             }
             hoverWork[session] = w
             DispatchQueue.main.async(execute: w)                                    // reveal on hover right away
         } else {
+            if hovered == session { hovered = nil }
+            m.showActivity(nil)                                                     // the busy card is hover-only
             m.peek(false)
+        }
+    }
+
+    /// What a busy orb is doing, or nil if it isn't busy.
+    func activity(for session: String) -> Activity? {
+        let title = sessions.displayName(session)
+        if model.s.transcribing_orbs.contains(session) || (session == model.cornerSession && model.s.transcribing && model.s.transcribing_orbs.isEmpty) {
+            return Activity(title: title, transcribing: true)
+        }
+        let e = sessions.entries.first { $0.name == session }
+        if e?.kind == "codex" {
+            let c = codexModel
+            guard c.online, c.s.thread_id == e?.id, c.mode == .working else { return nil }
+            return Activity(title: title, since: c.s.claude_at, steps: c.s.step.isEmpty ? [] : [c.s.step])
+        }
+        guard let st = model.s.sessions[session], st.state == "working", Date().timeIntervalSince1970 - st.at < 600 else { return nil }
+        return Activity(title: title, since: st.since ?? st.at, steps: st.steps ?? (st.step.isEmpty ? [] : [st.step]))
+    }
+
+    /// While an orb is hovered, keep its card current: new steps slide in; when it finishes, its last reply shows.
+    private func refreshHovered() {
+        guard let h = hovered, let (m, _) = bubbles[h] else { return }
+        if let a = activity(for: h) {
+            if m.activity == nil { m.dismissPeeks() }
+            m.showActivity(a)
+        } else if m.activity != nil {
+            m.showActivity(nil)
+            m.peek(true)
         }
     }
 
@@ -744,6 +791,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func feedCaptions() {
         refreshBubbleOwners()
+        refreshHovered()
         let list = model.s.captions
         if !captionsSeeded {                              // don't replay old replies on launch
             captionsSeeded = true

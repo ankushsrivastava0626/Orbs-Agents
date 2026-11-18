@@ -19,9 +19,18 @@ struct ReplyCard: Identifiable, Equatable {
     var stay: Double { id.hasPrefix("peek-") ? 10 : min(25, 5 + Double(text.count) * 0.06) }
 }
 
+/// What a busy orb is doing (hover a purple or coral orb): shown live, only while hovered.
+struct Activity: Equatable {
+    var title: String                            // "Claude · voice-2"
+    var transcribing = false                     // coral: your words are being written down
+    var since: Double = 0                        // when this run of work started
+    var steps: [String] = []                     // oldest first; the last is what it's doing right now
+}
+
 final class CaptionsModel: ObservableObject {
     @Published var cards: [ReplyCard] = []
     @Published var hovering = false
+    @Published var activity: Activity? = nil     // hovering a busy orb: what it's doing, live
     @Published var tailX: CGFloat? = nil       // where (in the panel) its orb is, for the bubble tail
     var contentHeight: CGFloat = 0             // how tall the cards are (the rest of the panel lets clicks through)
     private var seen = Set<String>()
@@ -55,6 +64,19 @@ final class CaptionsModel: ObservableObject {
     func forget() {
         last = nil
         if peeking { peeking = false; hovering = false; cards.removeAll { $0.id.hasPrefix("peek-") } }
+    }
+
+    /// Hovering a busy orb shows what it's doing and keeps it current; nil when the hover ends (only on hover).
+    func showActivity(_ a: Activity?) {
+        guard a != activity else { return }
+        let was = activity != nil
+        withAnimation(OSMotion.show) { activity = a }
+        if a != nil, !was { onVisibility?(true) }
+        if a == nil, cards.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in   // after the fade has played
+                if self?.cards.isEmpty == true, self?.activity == nil { self?.onVisibility?(false) }
+            }
+        }
     }
 
     /// Keep a spoken reply as the orb's "last message" (not shown now; hover the orb to see it).
@@ -96,7 +118,7 @@ final class CaptionsModel: ObservableObject {
         withAnimation(OSMotion.hide) { cards.removeAll { $0.id == id } }
         if cards.isEmpty {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in   // after the fade has played
-                if self?.cards.isEmpty == true { self?.onVisibility?(false) }
+                if self?.cards.isEmpty == true, self?.activity == nil { self?.onVisibility?(false) }
             }
         }
     }
@@ -209,7 +231,11 @@ struct CaptionsView: View {
             Spacer(minLength: 0)
             VStack(alignment: .center, spacing: 8) {
                 ForEach(m.cards) { c in
-                    ReplyCardView(card: c, tailX: m.tailX, showTail: c.id == m.cards.last?.id) { m.dismiss(c.id) }
+                    ReplyCardView(card: c, tailX: m.tailX, showTail: c.id == m.cards.last?.id && m.activity == nil) { m.dismiss(c.id) }
+                }
+                if let a = m.activity {                                   // nearest the orb: what it's doing now
+                    ActivityCard(a: a, tailX: m.tailX)
+                        .transition(.opacity.combined(with: .offset(y: 8)))
                 }
             }
             .background(GeometryReader { g in Color.clear.onAppear { m.contentHeight = g.size.height }
@@ -217,5 +243,78 @@ struct CaptionsView: View {
             .onHover { m.hovering = $0 }                                   // only the cards keep it up, not the empty space
         }
         .frame(width: 440, height: 520, alignment: .bottom)
+    }
+}
+
+/// A busy orb's live card: how long it's been at it, what it's doing now (slides in as each step starts) and the
+/// steps just before, ticked off. Purple spinner while it works, coral while your words are transcribed.
+struct ActivityCard: View {
+    let a: Activity
+    var tailX: CGFloat? = nil
+    static let w: CGFloat = 300
+    static let purple = Color(red: 0.65, green: 0.4, blue: 1.0), coral = Color(red: 1.0, green: 0.5, blue: 0.38)
+
+    static func elapsed(_ s: Double) -> String {
+        let t = Int(max(0, s)); return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60)
+                                                 : String(format: "%d:%02d", t / 60, t % 60)
+    }
+
+    var body: some View {
+        let w = Self.w, orbX = tailX ?? 220
+        let center = min(max(orbX, w / 2 + 4), 440 - w / 2 - 4)       // over the orb, but inside the panel
+        let tailLocal = orbX - (center - w / 2)
+        let accent = a.transcribing ? Self.coral : Self.purple
+        let now = a.transcribing ? "Transcribing what you said" : (a.steps.last ?? "Working")
+        let done = Array(a.transcribing ? [] : a.steps.dropLast().suffix(3).reversed())
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in   // a small spinner in the orb's color
+                    Circle().trim(from: 0, to: 0.3)
+                        .stroke(accent, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .frame(width: 10, height: 10)
+                        .rotationEffect(.degrees(tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2 * 360))
+                }
+                Text(a.title).font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.55)).lineLimit(1)
+                Spacer(minLength: 4)
+                if a.since > 0 {
+                    TimelineView(.periodic(from: .now, by: 1)) { tl in
+                        Text(Self.elapsed(tl.date.timeIntervalSince1970 - a.since))
+                            .font(.system(size: 10, design: .rounded)).monospacedDigit().foregroundColor(.white.opacity(0.45))
+                    }
+                }
+            }
+            ZStack(alignment: .leading) {                                  // the step slides up as the next begins
+                Text(now).font(.system(size: 13, weight: .medium, design: .rounded)).foregroundColor(.white)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    .id(now)
+                    .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity),
+                                            removal: .move(edge: .top).combined(with: .opacity)))
+            }
+            .clipped()
+            ForEach(Array(done.enumerated()), id: \.offset) { i, st in
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)).foregroundColor(.white.opacity(0.35))
+                    Text(st).font(.system(size: 11, design: .rounded)).foregroundColor(.white.opacity(0.5 - Double(i) * 0.12))
+                        .lineLimit(1)
+                }
+            }
+        }
+        .animation(OSMotion.show, value: now)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(width: w, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16).fill(Color(white: 0.07).opacity(0.94))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(accent.opacity(0.35), lineWidth: 1))
+                .shadow(color: .black.opacity(0.55), radius: 14, y: 4))
+        .overlay(alignment: .bottomLeading) {
+            if tailX != nil {                                              // the speech-bubble tail, at its orb
+                BubbleTail().fill(Color(white: 0.07).opacity(0.94))
+                    .frame(width: 22, height: 13)
+                    .offset(x: min(max(tailLocal - 11, 14), w - 36), y: 12)
+            }
+        }
+        .padding(.bottom, tailX != nil ? 12 : 0)
+        .offset(x: center - 220)
     }
 }

@@ -428,7 +428,7 @@ class H(BaseHTTPRequestHandler):
                 STATUS.update({k: v for k, v in ev.items() if k in ("claude", "step")}, claude_at=time.time())
                 if ev.get("voice"):
                     name = ev.get("session") or "voice"
-                    STATUS["sessions"][name] = {"state": ev.get("claude", "idle"), "step": ev.get("step", ""), "at": time.time()}
+                    session_step(name, ev.get("claude", "idle"), ev.get("step", ""))
                     if name == STATUS["target"]:
                         STATUS.update(voice_claude=ev.get("claude", "idle"), voice_claude_at=time.time())
             except Exception:
@@ -838,6 +838,17 @@ def send_to_codex(text):
     except Exception as e:
         print("codex input failed:", repr(e), flush=True); STATUS["problem_at"] = time.time()
 
+def session_step(name, state, step):
+    """An orb's state plus, while it works, when this run started and its last few steps (hovering a purple orb
+    shows them as they happen). A new prompt ("Thinking…") starts a new run."""
+    old, now = STATUS["sessions"].get(name) or {}, time.time()
+    working = state == "working"
+    same_run = working and old.get("state") == "working" and old.get("since") and step != "Thinking…"
+    since = old["since"] if same_run else (now if working else 0)
+    steps = list(old.get("steps") or []) if same_run else []
+    if working and step and (not steps or steps[-1] != step): steps = (steps + [step])[-6:]
+    STATUS["sessions"][name] = {"state": state, "step": step, "at": now, "since": since, "steps": steps}
+
 def tmux_target(name):
     """tmux matches a session by prefix ("voice" would hit "voice-2" when "voice" is gone): exact names only."""
     return "=" + name + ":"
@@ -866,7 +877,7 @@ def send_to_claude(text, to=None):
     subprocess.run([TMUX, "send-keys", "-t", tmux_target(target), "Enter"])
     print("sent:", text, "->", target, flush=True)
     STATUS.update(voice_claude="working", voice_claude_at=time.time())
-    STATUS["sessions"][target] = {"state": "working", "step": "", "at": time.time()}
+    session_step(target, "working", "Thinking…")
 
 def notes_file():
     return os.path.expanduser(config().get("NOTES_FILE", "/Users/kush/1/02_Projects/Repos/persistent agent/notes/notes.md"))
