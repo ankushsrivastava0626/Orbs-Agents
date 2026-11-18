@@ -387,10 +387,12 @@ def worker():
             STATUS["speaking"] = False
 
 class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"                    # keep-alive: the pet's 12 polls a second reuse one connection
     def log_message(self, *a): pass
     def _ok(self, body=b"ok"):
         try:
-            self.send_response(200); self.end_headers(); self.wfile.write(body)
+            self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass                                         # the pet stopped waiting (its polls time out fast): fine
     def _local(self):
@@ -398,7 +400,7 @@ class H(BaseHTTPRequestHandler):
         Browsers always send Origin on cross-site requests; and the Host check stops DNS rebinding."""
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
         if self.headers.get("Origin") or host not in ("127.0.0.1", "localhost", ""):
-            try: self.send_response(403); self.end_headers()
+            try: self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers()
             except OSError: pass
             return False
         return True

@@ -275,10 +275,12 @@ enum SystemInfo {
 
 // MARK: - the frontmost app's real menus, rebuilt as an NSMenu from Accessibility
 
-final class AXMenuBridge: NSObject {
-    private var keep: [AXUIElement] = []
+final class AXMenuBridge: NSObject, NSMenuDelegate {
+    private var keep: [AXUIElement] = []                     // the items of the menu being shown (pressed by tag)
+    private var unfilled: [ObjectIdentifier: (AXUIElement, Int)] = [:]   // submenus read only when you open them
 
     func menu(for pid: pid_t) -> NSMenu {
+        keep = []; unfilled = [:]                            // a new menu: the last one's items are done with
         let menu = NSMenu()
         let app = AXUIElementCreateApplication(pid)
         var bar: CFTypeRef?
@@ -289,7 +291,7 @@ final class AXMenuBridge: NSObject {
             let title = (attr(top, kAXTitleAttribute) as? String) ?? ""
             guard !title.isEmpty else { continue }
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            if let sub = children(top).first { item.submenu = build(sub, depth: 0) }
+            if let sub = children(top).first { item.submenu = lazyMenu(sub, depth: 0) }
             menu.addItem(item)
         }
         return menu
@@ -307,6 +309,7 @@ final class AXMenuBridge: NSObject {
 
     /// One top-level menu (e.g. "File") as an NSMenu.
     func menu(for pid: pid_t, title: String) -> NSMenu {
+        keep = []; unfilled = [:]
         let app = AXUIElementCreateApplication(pid)
         var bar: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXMenuBarAttribute as CFString, &bar) == .success, let bar,
@@ -325,13 +328,29 @@ final class AXMenuBridge: NSObject {
             item.isEnabled = (attr(el, kAXEnabledAttribute) as? Bool) ?? true
             if (attr(el, "AXMenuItemMarkChar") as? String)?.isEmpty == false { item.state = .on }
             if depth < 2, let sub = children(el).first, (attr(sub, kAXRoleAttribute) as? String) == "AXMenu" {
-                item.submenu = build(sub, depth: depth + 1); item.action = nil
+                item.submenu = lazyMenu(sub, depth: depth + 1); item.action = nil
             } else {
                 keep.append(el); item.tag = keep.count - 1
             }
             m.addItem(item)
         }
         return m
+    }
+
+    /// An empty submenu that reads the app's real one when it opens (reading every submenu up front made a click on
+    /// a big app's menu, e.g. Chrome's History, take seconds while all input waited).
+    private func lazyMenu(_ axMenu: AXUIElement, depth: Int) -> NSMenu {
+        let m = NSMenu(); m.autoenablesItems = false; m.delegate = self
+        let wait = NSMenuItem(title: "…", action: nil, keyEquivalent: ""); wait.isEnabled = false
+        m.addItem(wait)                                      // an empty submenu wouldn't open at all
+        unfilled[ObjectIdentifier(m)] = (axMenu, depth)
+        return m
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let (ax, depth) = unfilled.removeValue(forKey: ObjectIdentifier(menu)) else { return }
+        menu.removeAllItems()
+        for item in build(ax, depth: depth).items { item.menu?.removeItem(item); menu.addItem(item) }
     }
 
     @objc private func press(_ sender: NSMenuItem) {

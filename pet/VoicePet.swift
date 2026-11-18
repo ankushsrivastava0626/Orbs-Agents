@@ -94,16 +94,22 @@ final class Model: ObservableObject {
     init(base: String = "http://127.0.0.1:5123", tokenPath: String? = nil,
          idleColor: Color = Color(red: 0.55, green: 0.6, blue: 0.75)) {
         self.base = base; self.tokenPath = tokenPath; self.idleColor = idleColor
-        timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
             self?.poll()
             self?.checkHover()
         }
+        RunLoop.main.add(t, forMode: .common)            // keeps going while a menu or an alert is open
+        timer = t
     }
 
+    private var token: (value: String, read: Date)? = nil      // read every 10 s, not on every 80 ms poll
     func authorize(_ req: inout URLRequest) {
-        if let p = tokenPath, let t = try? String(contentsOfFile: p, encoding: .utf8) {
-            req.setValue("Bearer " + t.trimmingCharacters(in: .whitespacesAndNewlines), forHTTPHeaderField: "Authorization")
+        guard let p = tokenPath else { return }
+        if token == nil || Date().timeIntervalSince(token!.read) > 10,
+           let t = try? String(contentsOfFile: p, encoding: .utf8) {
+            token = (t.trimmingCharacters(in: .whitespacesAndNewlines), Date())
         }
+        if let t = token?.value { req.setValue("Bearer " + t, forHTTPHeaderField: "Authorization") }
     }
 
     func toggleAuto() {
@@ -197,15 +203,44 @@ final class Model: ObservableObject {
         if h != hovering { hovering = h }
     }
 
+    private var polling = false                  // one request at a time (late replies used to roll the state back)
+    private var lastData: Data?
+    private var fails = 0
+    private var lastRedraw = 0.0
+
+    /// Every 80 ms: only a changed reply is decoded and published. Publishing every one redrew every orb and panel
+    /// ~25×/s even with nothing happening.
+    private var lastPoll = 0.0
     private func poll() {
+        guard !polling else { return }
+        // fast only while something moves (mic level, Joe's voice); a server that's down is checked every 2 s
+        let every = fails >= 3 ? 2.0 : (s.listening || s.speaking || s.transcribing ? 0.08 : 0.15)
+        guard now - lastPoll >= every - 0.01 else { return }
+        lastPoll = now
+        polling = true
         var req = URLRequest(url: URL(string: base + "/status")!)
         authorize(&req)
-        req.timeoutInterval = 0.5
+        req.timeoutInterval = 1
         URLSession.shared.dataTask(with: req) { data, _, _ in
-            let st = data.flatMap { try? JSONDecoder().decode(Status.self, from: $0) }
             DispatchQueue.main.async {
-                self.online = st != nil
-                if let st { self.s = st; self.noteChanged() }
+                self.polling = false
+                guard let data, !data.isEmpty else {
+                    self.fails += 1
+                    if self.fails >= 3, self.online { self.online = false }   // offline after a few misses, not one
+                    return
+                }
+                self.fails = 0
+                if !self.online { self.online = true }
+                if data == self.lastData {
+                    // time-based looks (the 0.6 s "sent" pulse, the working timeout) still need a redraw now and then
+                    if self.now - self.s.heard_at < 1.2 || self.now - self.lastRedraw > 1 {
+                        self.lastRedraw = self.now; self.objectWillChange.send()
+                    }
+                    return
+                }
+                guard let st = try? JSONDecoder().decode(Status.self, from: data) else { return }
+                self.lastData = data; self.lastRedraw = self.now
+                self.s = st; self.noteChanged()
             }
         }.resume()
     }
@@ -546,6 +581,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cardPanels: [KeyPanel] = []
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // Accessibility calls to a busy app wait up to ~6 s by default, on the main thread that also runs the pet's
+        // keyboard and mouse taps, so the whole Mac's input stalls. Cap every one of them at half a second.
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.5)
+        // Every status poll (25×/s) was written to URLSession's on-disk cache. Nothing here should be cached.
+        URLCache.shared = URLCache(memoryCapacity: 0, diskCapacity: 0, diskPath: nil)
         DispatchQueue.main.async { [weak self] in self?.canvas.restore(); TaskTimer.shared.installStatusItem(); self?.pomodoro.show(); self?.meetingBadge.show(); self?.meetingBoard.restore(); self?.taskBoard.restore() }
         NSApp.setActivationPolicy(.accessory)   // no Dock icon, never steals focus
         model.orbFrames = { [weak self] in self?.orbPanels.filter { $0.alphaValue > 0.01 }.map(\.frame) ?? [] }   // the hidden corner orb must not catch hover over the strip
@@ -777,7 +817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quit completely: put the Mac's Dock and menu bar back, then unload the pet so it doesn't restart.
     @objc func menuQuitPet() {
         if osMode.on { osMode.toggle() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+        osMode.afterSettings {                                // the Dock and menu bar are back before the pet goes
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
             p.arguments = ["bootout", "gui/\(getuid())/com.claude.voice-pet"]
@@ -811,6 +851,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func watchOption() {
+        sessions.releaseIfLifted()                                   // a hold whose key-up the tap missed
         let f = CGEventSource.flagsState(.hidSystemState).rawValue
         let leftOpt = f & 0x00080000 != 0 && f & 0x20 != 0          // Option mask + left-Alt device bit
         let others = f & (0x00100000 | 0x00040000 | 0x00020000) != 0 // ⌘ ⌃ ⇧ held: not a plain tap

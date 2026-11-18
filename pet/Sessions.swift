@@ -246,6 +246,7 @@ final class SessionsController: NSObject {
             let c = Unmanaged<SessionsController>.fromOpaque(refcon).takeUnretainedValue()
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                 if let t = c.keyTap { CGEvent.tapEnable(tap: t, enable: true) }
+                DispatchQueue.main.async { c.releaseIfLifted() }
                 return Unmanaged.passUnretained(event)
             }
             return c.handleKey(type, event) ? nil : Unmanaged.passUnretained(event)
@@ -258,6 +259,7 @@ final class SessionsController: NSObject {
         keyTap = tap
         CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        watchClicksDuringHold()
     }
 
     /// Returns true to swallow the event (a bound normal key shouldn't also type).
@@ -267,7 +269,7 @@ final class SessionsController: NSObject {
         if capturing == nil, e.getIntegerValueField(.eventSourceUserData) != Self.replayMark {
             if code == Self.taskKey, type != .flagsChanged { return taskKey(type, e) }
             if type == .keyDown, let d = taskDown, !taskLive {          // typing fast after a `: it was just a `
-                taskDown = nil; replay(d)
+                taskDown = nil; replay(d); replay(e); return true       // in order: the ` first, then this key
             }
         }
         var down: Bool
@@ -294,9 +296,7 @@ final class SessionsController: NSObject {
         if e.getIntegerValueField(.eventSourceUserData) == Self.replayMark { return false }   // our own replayed key
         // Another key while a hotkey is down: it's a shortcut (Ctrl-C) or typing, not talking.
         if type == .keyDown, let h = held, h.code != code, !h.live || h.downEvent == nil {   // (a held modifier + key is always a shortcut)
-            held = nil
-            SpeakerMute.end()
-            post5123("/ptt", ["cancel": "1"])
+            cancelHold()
             if let d = h.downEvent {                                     // a normal key we held back: type it, then this one
                 replay(d); replay(e); return true
             }
@@ -306,31 +306,84 @@ final class SessionsController: NSObject {
             : entries.first(where: { hotkey(for: $0)?.code == code }).map { ($0.name, $0.kind) }
         if down, held == nil, let e2 = who {
             if type == .flagsChanged, flags & 0x1E0000 & ~Self.ownMask(code) != 0 { return false }  // part of a chord
+            if type == .keyDown, flags & 0x1E0000 != 0 { return false }  // ⌘1, ⇧1 (!), ⌃1…: a shortcut or a symbol, not talking
             let modifier = type == .flagsChanged
             held = (code, e2.name, modifier ? nil : e.copy(), false)
+            holdSeq += 1; liftedAt = nil
+            let token = holdSeq
             // start the mic now (so the first word isn't clipped); it only counts as talking once held a moment
-            post5123("/ptt", ["name": e2.name, "kind": e2.kind, "down": "1"])
-            let stamp = code
+            postPTT(["name": e2.name, "kind": e2.kind, "down": "1"])
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdDelay) { [weak self] in
-                if let self, let h = self.held, h.code == stamp { self.held?.live = true; SpeakerMute.begin() }
+                guard let self, self.holdSeq == token, self.held != nil else { return }   // this hold, not an earlier tap's
+                self.held?.live = true; SpeakerMute.begin()
             }
             return !modifier                                            // a normal key is held back until we know
         }
         if !down, let h = held, h.code == code {
-            held = nil
-            SpeakerMute.end()
-            if h.live {
-                post5123("/ptt", ["name": h.name, "down": ""])
-            } else {                                                    // a tap: the key keeps its normal job
-                post5123("/ptt", ["cancel": "1"])
-                if let d = h.downEvent { replay(d); replay(e) }
-            }
+            finishHold(h, up: e)
             return type != .flagsChanged
         }
         return type != .flagsChanged && held?.code == code              // swallow repeats of a held normal key
     }
 
     private static let holdDelay = 0.3
+    private var holdSeq = 0                      // each hold its own number (a tap's 0.3 s timer must not mark the next one live)
+    private var liftedAt: Date? = nil            // the held key is physically up, but its key-up hasn't reached the tap
+
+    /// The hold ended: send what was said, or (a tap) give the key back its normal job.
+    private func finishHold(_ h: (code: Int, name: String, downEvent: CGEvent?, live: Bool), up: CGEvent?) {
+        held = nil; liftedAt = nil
+        SpeakerMute.end()
+        if h.live {
+            postPTT(["name": h.name, "down": ""])
+        } else {                                                        // a tap: the key keeps its normal job
+            postPTT(["cancel": "1"])
+            if let d = h.downEvent {
+                replay(d)
+                if let u = up ?? CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(h.code), keyDown: false) { replay(u) }
+            }
+        }
+    }
+
+    private func cancelHold() {
+        held = nil; liftedAt = nil
+        SpeakerMute.end()
+        postPTT(["cancel": "1"])
+    }
+
+    /// Called ~120×/s: if macOS switched the key tap off for a moment (it does when the main thread is slow), the
+    /// held key's release can be missed; then the mic stayed on and the next press made one huge recording.
+    func releaseIfLifted() {
+        guard let h = held else { return }
+        let down: Bool
+        if let bit = Hotkey.modifierBits[h.code] { down = CGEventSource.flagsState(.hidSystemState).rawValue & bit != 0 }
+        else { down = CGEventSource.keyState(.hidSystemState, key: CGKeyCode(h.code)) }
+        if down { liftedAt = nil; return }
+        let since = liftedAt ?? Date(); liftedAt = since
+        if Date().timeIntervalSince(since) > 0.15 { finishHold(h, up: nil) }   // up for a moment: the release was lost
+    }
+
+    /// A click during a modifier hold (⌥-click, ⌥-drag) is a shortcut, not a note.
+    private func watchClicksDuringHold() {
+        _ = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            guard let self, let h = self.held, h.downEvent == nil else { return }
+            self.cancelHold()
+        }
+    }
+
+    /// /ptt events, one at a time and in order (separate requests to a threaded server could arrive swapped:
+    /// a tap's late "cancel" then killed the next real hold).
+    private let pttQ = DispatchQueue(label: "voicepet.ptt")
+    private func postPTT(_ body: [String: String]) {
+        var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/ptt")!)
+        req.httpMethod = "POST"; req.timeoutInterval = 1.5
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        pttQ.async {
+            let done = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { _, _, _ in done.signal() }.resume()
+            _ = done.wait(timeout: .now() + 2)
+        }
+    }
 
     // MARK: hold ` : task board (opens it and records while held; a quick tap still types `)
     static let taskKey = 50
@@ -482,9 +535,8 @@ final class SessionsController: NSObject {
         return ""
     }
 
-    private func sessionName(_ e: OrbEntry) -> String {
-        app?.voiceSessions()?.sessions.first { $0.id == e.id }?.name ?? URL(fileURLWithPath: e.cwd).lastPathComponent
-    }
+    /// Its folder's name (no script run: this is called while a menu opens, on the main thread).
+    private func sessionName(_ e: OrbEntry) -> String { URL(fileURLWithPath: e.cwd).lastPathComponent }
 
     // MARK: actions
 
@@ -648,10 +700,11 @@ final class SessionsController: NSObject {
 
     @objc func transcript(_ s: NSMenuItem) {
         guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
-        if let app {
+        guard let app else { return }
+        DispatchQueue.global().async {                                 // the script reads big transcripts: not on main
             let path = app.run("/usr/bin/python3", [app.voiceDir + "/voice_sessions.py", "transcript", e.id, e.kind])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !path.isEmpty { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+            if !path.isEmpty { DispatchQueue.main.async { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } }
         }
     }
 
@@ -714,7 +767,9 @@ final class SessionsController: NSObject {
 
     @objc func stopTask(_ s: NSMenuItem) {
         guard let n = s.representedObject as? String, let e = entries.first(where: { $0.name == n }) else { return }
-        if e.kind == "codex" { codexPost("/stop", [:]) } else { post5123("/claude/stop?s=\(n)", [:]) }
+        if e.kind == "codex" {
+            if codex.s.thread_id == e.id { codexPost("/stop", [:]) }   // only if it's this orb's conversation running
+        } else { post5123("/claude/stop?s=\(n)", [:]) }
     }
 
     @objc func codexAuto() { codex.toggleAuto() }

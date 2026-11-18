@@ -36,16 +36,26 @@ enum SelectionReader {
             e?.flags = .maskCommand
             e?.post(tap: .cghidEventTap)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-            guard pb.changeCount != before else { done(nil); return }                // nothing was selected
-            let text = pb.string(forType: .string)
-            pb.clearContents()                                                        // put your clipboard back
-            let items = saved.map { d -> NSPasteboardItem in
-                let i = NSPasteboardItem(); for (t, v) in d { i.setData(v, forType: t) }; return i
+        // Wait for the copy to land (busy apps take longer than a moment): read it within 1 s; and whenever it
+        // lands, even late, put your clipboard back, so it's never left holding the selection.
+        let started = Date()
+        var answered = false
+        func check() {
+            if pb.changeCount != before {
+                let text = pb.string(forType: .string)
+                pb.clearContents()                                                    // put your clipboard back
+                let items = saved.map { d -> NSPasteboardItem in
+                    let i = NSPasteboardItem(); for (t, v) in d { i.setData(v, forType: t) }; return i
+                }
+                if !items.isEmpty { pb.writeObjects(items) }
+                if !answered { answered = true; done(text) }
+                return
             }
-            if !items.isEmpty { pb.writeObjects(items) }
-            done(text)
+            let waited = Date().timeIntervalSince(started)
+            if waited > 1.0 && !answered { answered = true; done(nil) }              // nothing was selected
+            if waited < 3.0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { check() } }
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { check() }
     }
 
     /// Hand it to the voice server in paragraph-sized pieces (so long passages are read in full, in order).

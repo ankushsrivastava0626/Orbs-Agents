@@ -237,46 +237,56 @@ final class DialModel: ObservableObject {
     /// Dial apps: Finder, then apps pinned in the Dock, then running apps, then the most recently used
     /// apps in /Applications and /System/Applications (up to 18 in all).
     func loadDockApps() {
-        var urls: [URL] = [URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")]
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
-        proc.arguments = ["export", "com.apple.dock", "-"]
-        let pipe = Pipe(); proc.standardOutput = pipe
-        try? proc.run(); proc.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let dock = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
-        for key in ["persistent-apps", "recent-apps"] {
-            for it in (dock?[key] as? [[String: Any]]) ?? [] {
-                if let tile = it["tile-data"] as? [String: Any], let file = tile["file-data"] as? [String: Any],
-                   let s = file["_CFURLString"] as? String, let u = URL(string: s) { urls.append(u) }
-            }
-        }
+        // the Dock's apps, running apps, then everything installed (most recently used first): read off the main
+        // thread (a hundred app bundles plus `defaults` took a noticeable moment, with the keyboard tap waiting)
         let me = ProcessInfo.processInfo.processIdentifier
-        urls += NSWorkspace.shared.runningApplications
-            .filter { $0.activationPolicy == .regular && $0.processIdentifier != me }
-            .compactMap { $0.bundleURL }
-        let fm = FileManager.default
-        var installed: [(URL, Date)] = []
-        for dir in ["/Applications", "/System/Applications"] {
-            for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where name.hasSuffix(".app") {
-                let u = URL(fileURLWithPath: dir).appendingPathComponent(name)
-                let used = (try? u.resourceValues(forKeys: [.contentAccessDateKey]).contentAccessDate) ?? .distantPast
-                installed.append((u, used))
+        let running = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.processIdentifier != me }.compactMap { $0.bundleURL }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var urls: [URL] = [URL(fileURLWithPath: "/System/Library/CoreServices/Finder.app")]
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+            proc.arguments = ["export", "com.apple.dock", "-"]
+            let pipe = Pipe(); proc.standardOutput = pipe
+            try? proc.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            let dock = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+            for key in ["persistent-apps", "recent-apps"] {
+                for it in (dock?[key] as? [[String: Any]]) ?? [] {
+                    if let tile = it["tile-data"] as? [String: Any], let file = tile["file-data"] as? [String: Any],
+                       let s = file["_CFURLString"] as? String, let u = URL(string: s) { urls.append(u) }
+                }
+            }
+            urls += running
+            let fm = FileManager.default
+            var installed: [(URL, Date)] = []
+            for dir in ["/Applications", "/System/Applications"] {
+                for name in (try? fm.contentsOfDirectory(atPath: dir)) ?? [] where name.hasSuffix(".app") {
+                    let u = URL(fileURLWithPath: dir).appendingPathComponent(name)
+                    let used = (try? u.resourceValues(forKeys: [.contentAccessDateKey]).contentAccessDate) ?? .distantPast
+                    installed.append((u, used))
+                }
+            }
+            urls += installed.sorted { $0.1 > $1.1 }.map(\.0)
+            var seen = Set<String>(), paths: [String] = []
+            for u in urls {
+                let path = u.standardizedFileURL.path.replacingOccurrences(of: "/$", with: "", options: .regularExpression)
+                guard !path.contains("VoicePet"), !seen.contains(path), fm.fileExists(atPath: path) else { continue }
+                seen.insert(path); paths.append(path)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.allApps = paths.map { path in
+                    let icon = NSWorkspace.shared.icon(forFile: path)
+                    icon.size = NSSize(width: 64, height: 64)
+                    return DialApp(id: path, name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent,
+                                   url: URL(fileURLWithPath: path), icon: icon)
+                }
+                self.query = ""
+                self.refilter()
             }
         }
-        urls += installed.sorted { $0.1 > $1.1 }.map(\.0)
-        var seen = Set<String>()
-        allApps = urls.compactMap { u in
-            let path = u.standardizedFileURL.path.replacingOccurrences(of: "/$", with: "", options: .regularExpression)
-            guard !path.contains("VoicePet"), !seen.contains(path), fm.fileExists(atPath: path) else { return nil }
-            seen.insert(path)
-            let icon = NSWorkspace.shared.icon(forFile: path)
-            icon.size = NSSize(width: 64, height: 64)
-            return DialApp(id: path, name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent,
-                           url: URL(fileURLWithPath: path), icon: icon)
-        }
-        query = ""
-        refilter()
 
     }
 }
@@ -474,8 +484,10 @@ final class OSMode {
     private var timer: Timer?
     private var hiddenByUs: [NSRunningApplication] = []
     private var observers: [Any] = []
-    private var savedDockAutohide: Bool?
-    private var savedMenuAutohide: Bool?
+    private let sysQ = DispatchQueue(label: "voicepet.os-mode-settings")   // one at a time, in order (on, then off)
+
+    /// Run `f` on the main thread once the Dock/menu bar settings work queued so far is done (quitting waits for it).
+    func afterSettings(_ f: @escaping () -> Void) { sysQ.async { DispatchQueue.main.async(execute: f) } }
     private var escWasDown = false
     var keyDown: ((UInt16) -> Bool)?                  // Esc polling, provided by the app delegate
     var onChange: (() -> Void)?
@@ -559,6 +571,7 @@ final class OSMode {
         bar.onWifi = { [weak self] v, pt in
             guard let self else { return }
             self.barMenuOpen = true
+            WiFi.shared.refresh()                                 // fresh list for next time (scans only now)
             WiFi.shared.menu().popUp(positioning: nil, at: pt, in: v)
             self.barMenuOpen = false
         }
@@ -671,7 +684,6 @@ final class OSMode {
         bar.wifiOn = w.on; bar.wifiConnected = w.connected; bar.wifiStrength = w.strength
         let btOn = b.on
         bar.btOn = btOn; bar.btConnected = btOn && b.anyConnected
-        w.refresh()
     }
 
     private func powerMenu() -> NSMenu {
@@ -809,21 +821,26 @@ final class OSMode {
         dial.loadDockApps()
         // remember your real Dock/menu bar settings once (persisted, so a restart or a double start can't
         // overwrite them with the already-hidden state)
-        let ud = UserDefaults.standard
-        if ud.object(forKey: "osSavedDock") == nil {
-            ud.set(systemEvents("get autohide of dock preferences")?.booleanValue ?? false, forKey: "osSavedDock")
-            ud.set(systemEvents("get autohide menu bar of dock preferences")?.booleanValue ?? false, forKey: "osSavedMenu")
+        // Dock, menu bar and the other pet are changed on their own queue: AppleScript, `defaults` and a Dock
+        // restart take a second or more, and the main thread also runs the keyboard and mouse taps.
+        sysQ.async { [weak self] in
+            guard let self else { return }
+            let ud = UserDefaults.standard
+            if ud.object(forKey: "osSavedDock") == nil {
+                ud.set(self.systemEvents("get autohide of dock preferences") == "true", forKey: "osSavedDock")
+                ud.set(self.systemEvents("get autohide menu bar of dock preferences") == "true", forKey: "osSavedMenu")
+            }
+            self.systemEvents("set autohide of dock preferences to true")
+            self.systemEvents("set autohide menu bar of dock preferences to true")
+            if ud.object(forKey: "osSavedDockDelay") == nil {
+                ud.set(self.shell("/usr/bin/defaults", "read", "com.apple.dock", "autohide-delay") ?? "none", forKey: "osSavedDockDelay")
+            }
+            if self.shell("/usr/bin/defaults", "read", "com.apple.dock", "autohide-delay") != "1000" {   // restart only if it changed
+                _ = self.shell("/usr/bin/defaults", "write", "com.apple.dock", "autohide-delay", "-float", "1000")   // never reveals
+                _ = self.shell("/usr/bin/killall", "Dock")
+            }
+            self.pauseOtherPet()
         }
-        savedDockAutohide = ud.bool(forKey: "osSavedDock")
-        savedMenuAutohide = ud.bool(forKey: "osSavedMenu")
-        _ = systemEvents("set autohide of dock preferences to true")
-        _ = systemEvents("set autohide menu bar of dock preferences to true")
-        if ud.object(forKey: "osSavedDockDelay") == nil {
-            ud.set(shell("/usr/bin/defaults", "read", "com.apple.dock", "autohide-delay") ?? "none", forKey: "osSavedDockDelay")
-        }
-        _ = shell("/usr/bin/defaults", "write", "com.apple.dock", "autohide-delay", "-float", "1000")   // never reveals
-        _ = shell("/usr/bin/killall", "Dock")
-        pauseOtherPet()
 
         // black canvas on every screen: above the desktop, below all app windows
         let level = NSWindow.Level(rawValue: NSWindow.Level.normal.rawValue - 1)   // above desktop + widgets, below apps
@@ -1131,10 +1148,6 @@ final class OSMode {
         let box = Box(pid: pid, win: win, target: target)
         box.tablet = pendingTablet.removeValue(forKey: pid)
         if let p = pendingProfile.removeValue(forKey: pid) { box.chromeProfile = p }
-        if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.google.Chrome" {
-            // build Chrome's accessibility tree now, so the page address is readable when you switch modes
-            AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        }
         boxes.append(box)
         if isFinder { box.settleUntil = Date() }                     // don't force a frame on Finder
         else { setFrame(win, target) }
@@ -1148,7 +1161,7 @@ final class OSMode {
         log("box for pid \(pid): \(Int(target.width))x\(Int(target.height)) (window \(siblings + 1) of this app)")
         // apps keep every view and setting as they are: nothing is hidden. Bars an older OS mode hid come back
         // (Finder every time, other apps once).
-        if siblings == 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.restoreViews(pid, always: isFinder) } }
+        if siblings == 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.restoreViews(pid) } }
         refreshCanvas()
     }
 
@@ -1173,7 +1186,7 @@ final class OSMode {
     private func trackBoxes() {
         for pid in watching { adoptNewWindows(pid, attempt: 99) }    // e.g. Cmd-N or Chrome opened again
         boxes.removeAll { box in                                     // window closed or app quit: no box, no trail
-            NSRunningApplication(processIdentifier: box.pid)?.isTerminated != false || frameOf(box.win) == nil
+            NSRunningApplication(processIdentifier: box.pid)?.isTerminated != false || windowGone(box.win)
         }
         for box in boxes {
             let app = NSRunningApplication(processIdentifier: box.pid)
@@ -1182,7 +1195,6 @@ final class OSMode {
             if Date() < box.busyUntil { continue }
             guard let r = frameOf(box.win) else { continue }
             box.frame = r
-            resetPageZoom(box)
             if Date() > box.settleUntil, box.restoreFrame == nil, boxes.first(where: { $0.pid == box.pid }) === box {
                 saveBox(box.pid, r)                                  // the app's first window sets its size
             }
@@ -1194,11 +1206,12 @@ final class OSMode {
 
     private var clickTap: CFMachPort?
     private var clickSource: CFRunLoopSource?
-    private var swallowNextUp = false
+    private var swallowUpUntil = Date.distantPast
 
     private func installClickTap() {
+        // clicks only: scrolls used to pass through here for a Chrome swipe feature that never switches on,
+        // so every scroll on the Mac waited on the pet's main thread
         let mask: CGEventMask = (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.leftMouseUp.rawValue)
-                              | (1 << CGEventType.scrollWheel.rawValue)
         let me = Unmanaged.passUnretained(self).toOpaque()
         let cb: CGEventTapCallBack = { _, type, event, refcon in
             guard let refcon else { return Unmanaged.passUnretained(event) }
@@ -1207,20 +1220,19 @@ final class OSMode {
                 if let t = os.clickTap { CGEvent.tapEnable(tap: t, enable: true) }
                 return Unmanaged.passUnretained(event)
             }
-            if type == .scrollWheel { os.swipe(event); return Unmanaged.passUnretained(event) }   // never blocks scrolling
             if type == .leftMouseDown, os.dial.visible, os.pending == nil {          // click outside the dial closes it
                 let loc = event.location
                 let p = CGPoint(x: loc.x, y: (NSScreen.screens.first?.frame.height ?? 0) - loc.y)
                 if let f = os.dialPanel?.frame, !os.dialHit(p, in: f) { DispatchQueue.main.async { os.hideDial() } }
             }
-            if type == .leftMouseUp, os.swallowNextUp { os.swallowNextUp = false; return nil }
+            if type == .leftMouseUp, Date() < os.swallowUpUntil { os.swallowUpUntil = .distantPast; return nil }
             guard type == .leftMouseDown, event.getIntegerValueField(.mouseEventClickState) == 2 else {
                 return Unmanaged.passUnretained(event)
             }
             let loc = event.location                                 // top-left origin
             let p = CGPoint(x: loc.x, y: (NSScreen.screens.first?.frame.height ?? 0) - loc.y)
             guard let box = os.chromeBoxTitleBar(at: p) else { return Unmanaged.passUnretained(event) }
-            os.swallowNextUp = true
+            os.swallowUpUntil = Date().addingTimeInterval(0.5)      // only this click's own release
             DispatchQueue.main.async { box.lastToggle = Date(); os.toggleFill(box) }   // fill the screen (boxed, bars showing) / back
             return nil                                               // don't let macOS zoom/minimize it
         }
@@ -1258,7 +1270,7 @@ final class OSMode {
     private func removeClickTap() {
         if let t = clickTap { CGEvent.tapEnable(tap: t, enable: false) }
         if let s = clickSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), s, .commonModes) }
-        clickTap = nil; clickSource = nil; swallowNextUp = false
+        clickTap = nil; clickSource = nil; swallowUpUntil = .distantPast
     }
 
     // two-finger horizontal swipe over a tablet-mode Chrome box: back / forward
@@ -1414,26 +1426,6 @@ final class OSMode {
     private static let browsers: Set<String> = ["com.google.Chrome", "com.google.Chrome.canary", "com.brave.Browser",
                                                 "com.microsoft.edgemac", "company.thebrowser.Browser"]
 
-    /// Chrome remembers zoom per site; pages the old auto zoom-out shrank would still render their desktop
-    /// layout in a small box. On each new page, set zoom back to 100% so the site picks its own layout.
-    private func resetPageZoom(_ box: Box) {
-        guard Date() > box.settleUntil,
-              let bid = NSRunningApplication(processIdentifier: box.pid)?.bundleIdentifier, Self.browsers.contains(bid) else { return }
-        let title = (attr(box.win, kAXTitleAttribute) as? String) ?? ""
-        guard title != box.lastTitle else { return }
-        box.lastTitle = title
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in   // after the page has loaded
-            guard let self, self.on else { return }
-            AXUIElementSetAttributeValue(box.win, kAXMainAttribute as CFString, kCFBooleanTrue)
-            if let item = self.menuItems(AXUIElementCreateApplication(box.pid))
-                .first(where: { (self.attr($0, kAXTitleAttribute) as? String) == "Actual Size" }),
-               (self.attr(item, kAXEnabledAttribute) as? Bool) == true {   // enabled only when zoom isn't 100%
-                AXUIElementPerformAction(item, kAXPressAction as CFString)
-                self.log("reset page zoom to 100% for \(title.prefix(40))")
-            }
-        }
-    }
-
     private func windows(_ pid: pid_t) -> [AXUIElement] {
         let ax = AXUIElementCreateApplication(pid)
         var v: CFTypeRef?
@@ -1556,6 +1548,12 @@ final class OSMode {
         if let pv = AXValueCreate(.cgPoint, &pos) { AXUIElementSetAttributeValue(win, kAXPositionAttribute as CFString, pv) }
     }
 
+    /// Closed for good (not just busy: a beachballing app's calls time out, and its box must stay).
+    private func windowGone(_ win: AXUIElement) -> Bool {
+        var v: CFTypeRef?
+        return AXUIElementCopyAttributeValue(win, kAXRoleAttribute as CFString, &v) == .invalidUIElement
+    }
+
     private func frameOf(_ win: AXUIElement) -> CGRect? {
         var pv: CFTypeRef?, sv: CFTypeRef?
         guard AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &pv) == .success,
@@ -1576,15 +1574,16 @@ final class OSMode {
                                      "Hide Format Bar", "Hide Navigator", "Hide Inspector", "Hide Library"]
     private var decluttered: [(pid_t, String)] = []
 
-    /// Bring back the bars an older OS mode switched off (toolbar, sidebar, path/status/favorites bar).
-    private func restoreViews(_ pid: pid_t, always: Bool) {
+    /// Bring back the bars an older OS mode switched off (toolbar, sidebar, path/status/favorites bar): once per app,
+    /// so a bar you hide yourself stays hidden. (Finder used to get this on every new window.)
+    private func restoreViews(_ pid: pid_t) {
         guard let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier else { return }
         let key = "viewsRestored." + bundle
-        if !always, UserDefaults.standard.bool(forKey: key) { return }
+        if UserDefaults.standard.bool(forKey: key) { return }
         UserDefaults.standard.set(true, forKey: key)
-        let app = AXUIElementCreateApplication(pid)
+        let items = menuItems(AXUIElementCreateApplication(pid))        // read the menus once, not once per bar
         for want in ["Show Toolbar", "Show Sidebar", "Show Path Bar", "Show Status Bar", "Show Favorites Bar"] {
-            for item in menuItems(app) where (attr(item, kAXTitleAttribute) as? String) == want
+            for item in items where (attr(item, kAXTitleAttribute) as? String) == want
                                            && (attr(item, kAXEnabledAttribute) as? Bool) == true {
                 AXUIElementPerformAction(item, kAXPressAction as CFString)
                 log("restored \(bundle): \(want)")
@@ -1637,10 +1636,10 @@ final class OSMode {
         p.executableURL = URL(fileURLWithPath: args[0]); p.arguments = Array(args.dropFirst())
         let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
         guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()   // read first: a full pipe would block the program
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { return nil }
-        return String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // the separate CodexVoicePet orb (its own launch agent) is paused while OS mode is on
@@ -1663,28 +1662,31 @@ final class OSMode {
     }
 
     func restoreBars() {
-        resumeOtherPet()
-        let ud = UserDefaults.standard
-        guard ud.object(forKey: "osSavedDock") != nil else { return }
-        _ = systemEvents("set autohide of dock preferences to \(ud.bool(forKey: "osSavedDock"))")
-        _ = systemEvents("set autohide menu bar of dock preferences to \(ud.bool(forKey: "osSavedMenu"))")
-        ud.removeObject(forKey: "osSavedDock"); ud.removeObject(forKey: "osSavedMenu")
-        if let delay = ud.string(forKey: "osSavedDockDelay") {
-            if delay == "none" { _ = shell("/usr/bin/defaults", "delete", "com.apple.dock", "autohide-delay") }
-            else { _ = shell("/usr/bin/defaults", "write", "com.apple.dock", "autohide-delay", "-float", delay) }
-            ud.removeObject(forKey: "osSavedDockDelay")
-            _ = shell("/usr/bin/killall", "Dock")
+        sysQ.async { [weak self] in
+            guard let self else { return }
+            self.resumeOtherPet()
+            let ud = UserDefaults.standard
+            guard ud.object(forKey: "osSavedDock") != nil else { return }
+            self.systemEvents("set autohide of dock preferences to \(ud.bool(forKey: "osSavedDock"))")
+            self.systemEvents("set autohide menu bar of dock preferences to \(ud.bool(forKey: "osSavedMenu"))")
+            if let delay = ud.string(forKey: "osSavedDockDelay") {
+                if delay == "none" { _ = self.shell("/usr/bin/defaults", "delete", "com.apple.dock", "autohide-delay") }
+                else { _ = self.shell("/usr/bin/defaults", "write", "com.apple.dock", "autohide-delay", "-float", delay) }
+                _ = self.shell("/usr/bin/killall", "Dock")
+            }
+            // forget the saved values only once they're back (a pet killed halfway redoes this on its next start)
+            ud.removeObject(forKey: "osSavedDock"); ud.removeObject(forKey: "osSavedMenu"); ud.removeObject(forKey: "osSavedDockDelay")
+            self.log("restored Dock and menu bar")
         }
-        log("restored Dock and menu bar")
     }
 
     // MARK: helpers
 
+    /// System Events through osascript (NSAppleScript is main-thread only; this runs on `sysQ`). Its output, trimmed.
     @discardableResult
-    private func systemEvents(_ cmd: String) -> NSAppleEventDescriptor? {
-        var err: NSDictionary?
-        let r = NSAppleScript(source: "tell application \"System Events\" to \(cmd)")?.executeAndReturnError(&err)
-        if let err { FileHandle.standardError.write("os mode: System Events error \(err)\n".data(using: .utf8)!) }
+    private func systemEvents(_ cmd: String) -> String? {
+        let r = shell("/usr/bin/osascript", "-e", "tell application \"System Events\" to \(cmd)")
+        if r == nil { log("System Events failed: \(cmd)") }
         return r
     }
 }

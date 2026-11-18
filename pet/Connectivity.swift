@@ -31,6 +31,7 @@ final class WiFi: NSObject, CLLocationManagerDelegate {
     private let loc = CLLocationManager()               // macOS only reveals network names with Location access
     private let q = DispatchQueue(label: "wifi")
     private(set) var networks: [CWNetwork] = []         // last scan, strongest first
+    private var knownCache: [String] = []               // networks this Mac has joined (read off the main thread)
     private var lastScan = Date.distantPast
     var onChange: (() -> Void)?
 
@@ -50,12 +51,16 @@ final class WiFi: NSObject, CLLocationManagerDelegate {
         return min(1, max(0.1, Double(r + 90) / 40))      // -90 dBm weak … -50 dBm full
     }
 
-    /// Scan in the background (at most every 15 s) so the menu opens instantly.
+    /// Scan in the background (at most every 15 s) so the menu opens instantly. Only when asked (OS mode
+    /// starting, the Wi-Fi menu opening): a scan takes the radio off its channel, a hiccup for calls and voice.
     func refresh() {
         guard on, Date().timeIntervalSince(lastScan) > 15 else { return }
         lastScan = Date()
         q.async { [weak self] in
-            guard let self, let found = try? self.iface?.scanForNetworks(withName: nil) else { return }
+            guard let self else { return }
+            let k = self.known()
+            DispatchQueue.main.async { self.knownCache = k }
+            guard let found = try? self.iface?.scanForNetworks(withName: nil) else { return }
             var best: [String: CWNetwork] = [:]
             for n in found { guard let s = n.ssid, !s.isEmpty else { continue }
                 if (best[s]?.rssiValue ?? -999) < n.rssiValue { best[s] = n } }
@@ -90,7 +95,7 @@ final class WiFi: NSObject, CLLocationManagerDelegate {
         }
         m.addItem(.separator())
         m.addItem(header(networks.isEmpty ? "Known Networks" : "Networks"))
-        let knownList = known()
+        let knownList = knownCache
         if networks.isEmpty {
             // no scan results (Location not allowed yet, or still scanning): join a network this Mac knows
             for s in knownList.prefix(12) {
@@ -204,16 +209,24 @@ final class Bluetooth {
 // MARK: - Speakers: silence the Mac while you hold a talk key, so the mic hears only you
 
 enum SpeakerMute {
-    private static var mutedByUs = false
+    // Core Audio, on its own queue: begin/end are called from the keyboard tap, which must never wait
+    // (AppleScript "set volume" there held every keystroke on the Mac until it finished).
+    private static let q = DispatchQueue(label: "voicepet.speaker-mute")
+    private static var mutedDevice: AudioDeviceID? = nil          // the speakers we muted (unmute those, even if output moved)
 
-    /// True when sound is coming out of the Mac's own speakers (not headphones, AirPods, a display…).
-    static var onBuiltInSpeakers: Bool {
+    private static func defaultOutput() -> AudioDeviceID? {
         var dev = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
         var a = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
                                            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &dev) == noErr else { return false }
-        var transport = UInt32(0); size = UInt32(MemoryLayout<UInt32>.size)
-        a.mSelector = kAudioDevicePropertyTransportType
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &dev) == noErr else { return nil }
+        return dev
+    }
+
+    /// True when sound is coming out of the Mac's own speakers (not headphones, AirPods, a display…).
+    private static func builtInSpeakers(_ dev: AudioDeviceID) -> Bool {
+        var a = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                           mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var transport = UInt32(0), size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &transport) == noErr,
               transport == kAudioDeviceTransportTypeBuiltIn else { return false }
         // built-in output with headphones plugged into the jack reports a "headphones" data source
@@ -223,22 +236,43 @@ enum SpeakerMute {
         return true
     }
 
-    private static func run(_ s: String) -> NSAppleEventDescriptor? {
-        var err: NSDictionary?
-        return NSAppleScript(source: s)?.executeAndReturnError(&err)
+    /// The device's mute switch: the master one, else per channel.
+    private static func muteAddresses(_ dev: AudioDeviceID) -> [AudioObjectPropertyAddress] {
+        for els in [[kAudioObjectPropertyElementMain], [1, 2]] as [[UInt32]] {
+            let addrs = els.map { AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute,
+                                                              mScope: kAudioDevicePropertyScopeOutput, mElement: $0) }
+            if addrs.allSatisfy({ var x = $0; return AudioObjectHasProperty(dev, &x) }) { return addrs }
+        }
+        return []
+    }
+
+    private static func muted(_ dev: AudioDeviceID) -> Bool {
+        guard var a = muteAddresses(dev).first else { return false }
+        var v = UInt32(0), size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(dev, &a, 0, nil, &size, &v) == noErr && v != 0
+    }
+
+    private static func setMuted(_ dev: AudioDeviceID, _ on: Bool) {
+        var v: UInt32 = on ? 1 : 0
+        for var a in muteAddresses(dev) {
+            AudioObjectSetPropertyData(dev, &a, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v)
+        }
     }
 
     static func begin() {
-        guard !mutedByUs, onBuiltInSpeakers else { return }
-        let already = run("output muted of (get volume settings)")?.booleanValue ?? false
-        guard !already else { return }                 // you muted it yourself: leave it that way
-        _ = run("set volume with output muted")
-        mutedByUs = true
+        q.async {
+            guard mutedDevice == nil, let dev = defaultOutput(), builtInSpeakers(dev),
+                  !muteAddresses(dev).isEmpty, !muted(dev) else { return }   // you muted it yourself: leave it that way
+            setMuted(dev, true)
+            mutedDevice = dev
+        }
     }
 
     static func end() {
-        guard mutedByUs else { return }
-        mutedByUs = false
-        _ = run("set volume without output muted")
+        q.async {
+            guard let dev = mutedDevice else { return }
+            mutedDevice = nil
+            setMuted(dev, false)
+        }
     }
 }
