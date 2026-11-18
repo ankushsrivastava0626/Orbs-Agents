@@ -431,7 +431,7 @@ final class DialHost<V: View>: NSHostingView<V> {
 // MARK: - Canvas (black backdrop) with box frames
 
 final class CanvasView: NSView {
-    var boxes: [CGRect] = [] { didSet { needsDisplay = true } }      // in this view's coordinates
+    var boxes: [CGRect] = [] { didSet { if boxes != oldValue { needsDisplay = true } } }   // only a real change redraws
     override func draw(_ dirty: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.setFillColor(NSColor.black.cgColor)
@@ -651,12 +651,17 @@ final class OSMode {
     }
 
     private func refreshMenuBar() {
-        bar.now = Date()
+        let t = Date()                                               // the clock shows minutes: redraw once a minute
+        if Int(t.timeIntervalSince1970 / 60) != Int(bar.now.timeIntervalSince1970 / 60) { bar.now = t }
         let app = frontApp()
         let name = app?.localizedName ?? ""
         if bar.appName != name { bar.appName = name; bar.appIcon = app?.icon }
         if let (state, step) = voiceStatus?() { if bar.status != state { bar.status = state }; if bar.step != step { bar.step = step } }
-        if let (n, a, t) = modeStates?() { bar.notes = n; bar.auto = a; bar.tunnel = t }
+        if let (n, a, tv) = modeStates?() {                          // only what changed (each set redraws the bar)
+            if bar.notes != n { bar.notes = n }
+            if bar.auto != a { bar.auto = a }
+            if bar.tunnel != tv { bar.tunnel = tv }
+        }
         let filled = app.flatMap { a in boxes.last { $0.pid == a.processIdentifier && $0.restoreFrame != nil } }
         if (filled != nil) != bar.appMode { bar.appMode = filled != nil }
         if let f = filled, let a = app {
@@ -752,9 +757,13 @@ final class OSMode {
             return DockItem(id: pid, name: app.localizedName ?? "App", icon: icon,
                             windows: boxes.filter { $0.pid == pid }.count, active: pid == front)
         }
-        dock.now = Date()
-        if items != dock.items { dock.items = items }
-        DispatchQueue.main.async { [weak self] in self?.layoutDock(on: NSScreen.screens[0]) }  // always centred
+        if Date().timeIntervalSince(dock.now) >= 1 { dock.now = Date() }   // at most once a second
+        if items != dock.items {                                     // re-lay it out only when its apps change
+            dock.items = items
+            DispatchQueue.main.async { [weak self] in
+                if let s = NSScreen.screens.first { self?.layoutDock(on: s) }   // always centred
+            }
+        }
     }
 
     /// Bring an app's box forward; clicking again cycles through its windows. Its outline pulses gold.
@@ -784,7 +793,7 @@ final class OSMode {
     }
 
     private func closeFront(_ pid: pid_t) {
-        guard let box = boxes.first(where: { $0.pid == pid }), let close = attr(box.win, kAXCloseButtonAttribute) else { return }
+        guard let box = focusedBox(pid), let close = attr(box.win, kAXCloseButtonAttribute) else { return }
         AXUIElementPerformAction(close as! AXUIElement, kAXPressAction as CFString)
     }
 
@@ -815,9 +824,27 @@ final class OSMode {
         }
     }
 
+    private var screenObs: NSObjectProtocol?
+    private var screenWork: DispatchWorkItem?
+
+    /// A display plugged in or out (or a resolution change, the lid): canvases and the bar were built for the old
+    /// screens. Rebuild OS mode once things settle.
+    private func screensChanged() {
+        screenWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in
+            guard let self, self.on, !NSScreen.screens.isEmpty else { return }
+            self.log("displays changed: rebuilding")
+            self.stop(); self.start()
+        }
+        screenWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: w)
+    }
+
     func start() {
         guard !on else { return }
         on = true
+        screenObs = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                           object: nil, queue: .main) { [weak self] _ in self?.screensChanged() }
         dial.loadDockApps()
         // remember your real Dock/menu bar settings once (persisted, so a restart or a double start can't
         // overwrite them with the already-hidden state)
@@ -912,6 +939,7 @@ final class OSMode {
     func stop() {
         guard on else { return }
         on = false
+        if let o = screenObs { NotificationCenter.default.removeObserver(o); screenObs = nil }
         timer?.invalidate(); timer = nil
         removeClickTap()
         observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }; observers = []
@@ -1468,7 +1496,16 @@ final class OSMode {
     }
 
     private func toggleFill(_ pid: pid_t) {
-        if let box = boxes.first(where: { $0.pid == pid }) { toggleFill(box) }
+        // "Back to box" on the filled window (not the app's first one); otherwise the window you're using
+        if let box = boxes.first(where: { $0.pid == pid && $0.restoreFrame != nil }) ?? focusedBox(pid) { toggleFill(box) }
+    }
+
+    /// The app's focused window's box, else its first.
+    private func focusedBox(_ pid: pid_t) -> Box? {
+        let mine = boxes.filter { $0.pid == pid }
+        if let fw = attr(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute),
+           let b = mine.first(where: { CFEqual($0.win, fw as CFTypeRef) }) { return b }
+        return mine.first
     }
 
     /// macOS animates out of fullscreen and then restores the old frame itself; wait until that's over,
