@@ -14,8 +14,10 @@ for i in 1 2 3 4 5; do curl -s -m 1 $S/status >/dev/null || bad "status slow or 
 
 echo "settings"
 before_stt=$(curl -s $S/status | j "d.get('stt_engine')"); before_v=$(curl -s $S/status | j "d.get('voice_engine')")
-[ "$before_stt" = cloud ] && [ "$before_v" = fish ] && ok "engines reported (stt=$before_stt, voice=$before_v)" || bad "engines: stt=$before_stt voice=$before_v"
-curl -s -X POST "$S/settings?ENGINE=bogus" | grep -q '"ENGINE": "fish"' && ok "bad setting ignored" || bad "bad setting not ignored"
+cfg() { sed -n "s/^$1=\([a-z]*\).*/\1/p" "$HOME/.claude/voice/config" | tail -1; }
+want_stt=$(cfg STT_ENGINE); want_v=$(cfg ENGINE)
+[ "$before_stt" = "${want_stt:-cloud}" ] && [ "$before_v" = "${want_v:-fish}" ] && ok "engines reported (stt=$before_stt, voice=$before_v)" || bad "engines: stt=$before_stt voice=$before_v (config says ${want_stt:-cloud}/${want_v:-fish})"
+curl -s -X POST "$S/settings?ENGINE=bogus" | grep -q "\"ENGINE\": \"$before_v\"" && ok "bad setting ignored" || bad "bad setting not ignored"
 
 echo "Joe's voice"
 curl -s -X POST "$S/?kind=report" -d "Testing, sir." >/dev/null

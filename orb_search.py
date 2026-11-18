@@ -12,7 +12,17 @@ import moved_paths
 
 V = os.path.expanduser("~/.claude/voice")
 PROJECTS = os.path.expanduser("~/.claude/projects")
-CODEX_ROOT = "/Users/kush/Documents/Codex/2026-10-04/can-x20/outputs/codex-voice-assistant"
+def setting(key, default=""):
+    """One value from ~/.claude/voice/config (same rules as the server: text after # ignored, quotes stripped)."""
+    val = default
+    try:
+        for line in open(os.path.join(V, "config")):
+            line = line.split("#", 1)[0].strip()
+            if "=" in line and line.split("=", 1)[0].strip() == key: val = line.split("=", 1)[1].strip().strip('"')
+    except OSError: pass
+    return os.path.expanduser(val)
+
+CODEX_ROOT = setting("CODEX_ROOT")                  # optional Codex voice server; empty = no Codex sessions
 CACHE = os.path.join(V, "cache", "search_index.json")
 
 
@@ -127,7 +137,7 @@ def sessions():
             if sid in seen: continue
             seen.add(sid)
             out.append({"kind": "claude", "id": sid, "cwd": "", "file": f, "name": "", "command": cmd})
-    reg = load(os.path.join(CODEX_ROOT, "runtime", "sessions.json"), {}).get("sessions", [])
+    reg = load(os.path.join(CODEX_ROOT, "runtime", "sessions.json"), {}).get("sessions", []) if CODEX_ROOT else []
     for s in reg + [o for o in load(os.path.join(V, "orbs.json"), []) if o.get("kind") == "codex"]:
         sid = s.get("id")
         if not sid or sid in seen: continue

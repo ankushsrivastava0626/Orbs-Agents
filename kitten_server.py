@@ -24,7 +24,7 @@ def write_json(path, obj, **kw):
 def set_config(key, value):
     """Change one setting in the config file, keeping its comment (or add it at the top)."""
     path = os.path.join(DIR, "config")
-    lines = open(path).read().split("\n")
+    lines = open(path).read().split("\n") if os.path.exists(path) else []
     for i, l in enumerate(lines):
         if re.match(rf"^{key}=", l):
             rest = l.split("=", 1)[1]
@@ -37,7 +37,9 @@ def set_config(key, value):
 
 def config():
     cfg = {}
-    for line in open(os.path.join(DIR, "config")):
+    path = os.path.join(DIR, "config")
+    if not os.path.exists(path): return cfg       # no config file yet: every setting has its default
+    for line in open(path):
         line = line.split("#", 1)[0].strip()
         if "=" in line:
             k, v = line.split("=", 1)
@@ -186,7 +188,9 @@ def is_audio_error(e):
 FISH_RATE = 44100                                # OpenRouter's Fish PCM: 44.1 kHz mono 16-bit
 
 def openrouter_key():
-    env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/1/.env"))
+    """The OpenRouter key, read from your .env each time it's needed (never stored or logged here)."""
+    env = os.path.expanduser(config().get("OPENROUTER_ENV", os.path.join(DIR, ".env")))
+    if not os.path.exists(env): raise RuntimeError("no OpenRouter key file: put OPENROUTER_API_KEY=… in " + env)
     key = next((l.split("=", 1)[1].strip().strip('"\'') for l in open(env) if l.startswith("OPENROUTER_API_KEY=")), "")
     if not key: raise RuntimeError("no OPENROUTER_API_KEY in " + env)
     return key
@@ -332,7 +336,7 @@ def speak_job(my_gen, text, kind, who):
     if my_gen != gen:
         return
     cfg = config()
-    engine = cfg.get("ENGINE", "gemini")
+    engine = cfg.get("ENGINE", "fish")
     try:
         if engine == "fish":                     # Joe is Fish Drama 3; no backup voice
             STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
@@ -807,7 +811,7 @@ def ensure_voice_session():
         print("voice session did not become ready", flush=True)
         return False
 
-CODEX_ROOT = "/Users/kush/Documents/Codex/2026-10-04/can-x20/outputs/codex-voice-assistant"
+CODEX_ROOT = os.path.expanduser(config().get("CODEX_ROOT", ""))   # optional Codex voice server (its runtime/ folder)
 
 def codex_use_orb(token):
     """Several Codex orbs share one Codex server, which holds one conversation at a time: switch it to the
@@ -880,7 +884,7 @@ def send_to_claude(text, to=None):
     session_step(target, "working", "Thinking…")
 
 def notes_file():
-    return os.path.expanduser(config().get("NOTES_FILE", "/Users/kush/1/02_Projects/Repos/persistent agent/notes/notes.md"))
+    return os.path.expanduser(config().get("NOTES_FILE", os.path.join(DIR, "notes", "notes.md")))
 
 def save_note(text):
     """Notes mode: append one line per utterance with date and time, instead of sending to Claude."""
@@ -1551,9 +1555,7 @@ OPENROUTER_MODEL = "minimax/minimax-m3.1-flash"   # task board reshape, meeting 
 def openrouter(messages, max_tokens=4000):
     """One reply from the boards' AI model on OpenRouter. The key is read from your .env (never stored here)."""
     import urllib.request
-    env = os.path.expanduser(config().get("OPENROUTER_ENV", "/Users/kush/1/.env"))
-    key = next((l.split("=", 1)[1].strip().strip('"\'') for l in open(env) if l.startswith("OPENROUTER_API_KEY=")), "")
-    if not key: raise RuntimeError("no OPENROUTER_API_KEY in " + env)
+    key = openrouter_key()
     req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", method="POST",
         data=json.dumps({"model": config().get("MEETING_MODEL", OPENROUTER_MODEL), "messages": messages,
                          "max_tokens": max_tokens, "provider": PRIVATE}).encode(),

@@ -1,6 +1,6 @@
 #!/bin/bash
 # (Re)start the Claude voice session in tmux: Joe persona, speak tool, Chrome.
-#   start-voice-session.sh                    new session in the last folder (default: persistent agent)
+#   start-voice-session.sh                    new session in the last folder (default: DEFAULT_CWD in config, else ~)
 #   start-voice-session.sh --cwd /some/dir    new session in that folder
 #   start-voice-session.sh --resume <id>      resume a previous voice session (in its own folder)
 #   ... --name voice-2                         run it as another orb/session (tmux session name; default "voice")
@@ -12,7 +12,10 @@
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 V="$HOME/.claude/voice"; TMUX_BIN=/opt/homebrew/bin/tmux
 CWD="$(/usr/bin/python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("cwd",""))' "$V/session.json" 2>/dev/null)"
-[ -d "$CWD" ] || CWD="/Users/kush/1/02_Projects/Repos/persistent agent"
+[ -d "$CWD" ] || CWD="$(/usr/bin/python3 -c 'import os,sys
+v=[l.split("#",1)[0].split("=",1)[1].strip().strip(chr(34)) for l in open(sys.argv[1]) if "=" in l and l.split("=",1)[0].strip()=="DEFAULT_CWD"]
+print(os.path.expanduser(v[-1]) if v else "")' "$V/config" 2>/dev/null)"
+[ -d "$CWD" ] || CWD="$HOME"
 RESUME=""; NAME="voice"; FRESH=0; CMD=""; MODEL_ARG=""; AGENT=""; AGENT_ARGS=""; PROMPT="$V/voice-system-prompt.md"
 while [ $# -gt 0 ]; do
   case "$1" in

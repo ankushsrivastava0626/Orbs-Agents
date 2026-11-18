@@ -6,6 +6,21 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
+/// One setting from ~/.claude/voice/config, read the way the voice server reads it (KEY=value per line, text after #
+/// ignored, quotes stripped, the last one wins), with a leading ~ expanded. nil when it's missing or empty.
+func voiceSetting(_ key: String) -> String? {
+    guard let text = try? String(contentsOfFile: NSHomeDirectory() + "/.claude/voice/config", encoding: .utf8) else { return nil }
+    var value: String?
+    for raw in text.components(separatedBy: "\n") {
+        let line = (raw.components(separatedBy: "#").first ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let eq = line.firstIndex(of: "="), line[..<eq].trimmingCharacters(in: .whitespaces) == key else { continue }
+        value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    }
+    guard let v = value, !v.isEmpty else { return nil }
+    return (v as NSString).expandingTildeInPath
+}
+
 struct SessState: Codable {
     var state = "idle", step = "", at = 0.0
     var since: Double? = nil                     // when this run of work started
@@ -194,7 +209,7 @@ final class Model: ObservableObject {
     }
 
     func openNotes() {
-        let path = "/Users/kush/1/02_Projects/Repos/persistent agent/notes/notes.md"
+        let path = voiceSetting("NOTES_FILE") ?? NSHomeDirectory() + "/.claude/voice/notes/notes.md"
         let url = URL(fileURLWithPath: path)
         if !FileManager.default.fileExists(atPath: path) {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -894,7 +909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The Codex assistant's orb (its own voice server on :5124, token in its runtime folder).
     lazy var codexModel = Model(
         base: "http://127.0.0.1:5124",
-        tokenPath: "/Users/kush/Documents/Codex/2026-10-04/can-x20/outputs/codex-voice-assistant/runtime/token",
+        tokenPath: voiceSetting("CODEX_ROOT").map { $0 + "/runtime/token" },
         idleColor: Color(red: 1.0, green: 0.73, blue: 0.3))
     func watchCodexApproval() { sessions.checkApproval() }
 

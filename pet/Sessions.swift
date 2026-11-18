@@ -108,7 +108,6 @@ final class SessionsController: NSObject {
     private var timer: Timer?
     private let orbsPath = NSHomeDirectory() + "/.claude/voice/orbs.json"
     private let launcher = NSHomeDirectory() + "/.claude/voice/start-voice-session.sh"
-    private let codexRoot = "/Users/kush/Documents/Codex/2026-10-04/can-x20/outputs/codex-voice-assistant"
     private var promptedApproval = -1
     private var approvalOpen = false
 

@@ -1,0 +1,42 @@
+# Orbs Agents settings. install.sh copies this file to ~/.claude/voice/config; the orb menu changes some of them.
+# One KEY=value per line, text after # is a comment. bash reads this file too, so quote values that have spaces.
+
+# ── Key ────────────────────────────────────────────────────────────────────────────────────────────────
+# OPENROUTER_ENV=~/.claude/voice/.env   # file with a line OPENROUTER_API_KEY=sk-or-…  (read at call time, never stored)
+
+# ── Speech to text ─────────────────────────────────────────────────────────────────────────────────────
+STT_ENGINE=cloud    # cloud (AssemblyAI; ElevenLabs Scribe v2 for meetings) | local (Parakeet on this Mac) — orb menu switches it
+STT_MODEL=assemblyai/universal-3-6-pro   # commands, notes and task cards (via OpenRouter)
+MEETING_STT_MODEL=elevenlabs/scribe-v2   # meetings, with speaker labels (via OpenRouter)
+VOICE_MIC=MacBook   # microphone to record from (part of its name). The built-in mic keeps AirPods out of call mode
+
+# ── Joe, the voice that reads replies ──────────────────────────────────────────────────────────────────
+ENGINE=fish         # fish (Fish Audio Drama 3 via OpenRouter) | gemini (Gemini Live, key in Keychain) | kitten (on-device) — orb menu switches it
+FISH_MODEL=fish-audio/drama-3
+FISH_VOICE=ffe96076aeaf4da6b13b5f204ba1445b   # Fish Audio voice id (Joe)
+FISH_SPEED=1.0      # 1.0 = as Fish speaks it; above 1 is faster, pitch kept
+GEMINI_MODEL=models/gemini-3.8-live
+GEMINI_VOICE=Orus   # Gemini prebuilt voice
+GEMINI_SPEED=1.5    # playback speed, pitch kept
+KITTEN_MODEL=KittenML/kitten-tts-nano-0.8-int8   # ENGINE=kitten only (pip install kittenml)
+KITTEN_VOICE=Jasper
+KITTEN_SPEED=1.6
+# Joe's character: persona.txt · how orb sessions talk to you: voice-system-prompt.md
+
+# ── Boards ─────────────────────────────────────────────────────────────────────────────────────────────
+# MEETING_MODEL=minimax/minimax-m3.1-flash   # rewrites task cards and answers meeting-board prompts
+
+# ── Orbs ───────────────────────────────────────────────────────────────────────────────────────────────
+# DEFAULT_CWD=~/code      # folder a new orb starts in when you don't pick one (default: your home folder)
+# NOTES_FILE=~/notes.md   # notes mode: one timestamped line per utterance (default: ~/.claude/voice/notes/notes.md)
+VOICE_BARGE_IN=off  # on = in auto mode, talking interrupts Joe (headphones only; speakers echo)
+PTT_SOURCE=pet      # pet: number keys and left ⌥ through the app | server: left ⌥ only, no app needed
+VOICE_TMUX_TARGET=voice   # tmux session that gets auto-mode speech
+# CODEX_ROOT=             # folder of the optional Codex voice server (for Codex orbs)
+# KEEP_RESIDENT=off       # on = keep the on-device speech model locked in memory
+
+# ── Legacy narration hooks (speak-*.sh) ────────────────────────────────────────────────────────────────
+VOICE=Samantha      # macOS `say` voice used when the voice server is down
+RATE=200
+MAX_SENTENCES=2
+VOICE_ONLY_IN=      # only narrate sessions under these folders (| separated); empty = all

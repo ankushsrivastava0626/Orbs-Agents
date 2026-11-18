@@ -1,14 +1,20 @@
-"""Folders that moved (Nov 2026: everything went into ~/1/…). Conversations remember the folder they ran in;
-this maps an old folder to where it lives now, and links the conversation into the new folder's list so
-`claude --resume` finds it there. Add a line to MOVED when you move something else."""
-import os, re, sys
+"""Folders that moved. A conversation remembers the folder it ran in; when that folder has since moved, this maps
+the old path to its new home and links the conversation into the new folder's list so `claude --resume` finds it.
+List your moves in ~/.claude/voice/moved.json (old prefix -> new prefix, longest match wins):
+    {"~/old/projects": "~/new/projects"}"""
+import json, os, re, sys
 
 H = os.path.expanduser("~")
-MOVED = {                                         # old prefix -> new prefix (longest match wins)
-    H + "/Githubs": H + "/1/02_Projects/Repos",
-    H + "/OR": H + "/1/05_Personal/Finance/OR",
-    H + "/claude-runpod": H + "/1/02_Projects/Active/claude-runpod",
-}
+
+def _moves():
+    p = os.path.join(H, ".claude", "voice", "moved.json")
+    if not os.path.exists(p): return {}
+    try: raw = json.load(open(p))
+    except ValueError as e:
+        print("moved.json is not valid JSON:", e, file=sys.stderr); return {}
+    return {os.path.expanduser(k).rstrip("/"): os.path.expanduser(v).rstrip("/") for k, v in raw.items()}
+
+MOVED = _moves()                                  # old prefix -> new prefix
 
 def where(cwd):
     """The folder now: itself if it still exists, else its new home (or "" if unknown)."""

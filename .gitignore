@@ -31,3 +31,14 @@ sessions.json.broken
 prompts/
 samples/
 .DS_Store
+
+# Your settings, keys and personal data (start from config.example)
+config
+.env
+*.env
+moved.json
+notes/
+failed/
+off
+RESTORE.md
+system/claude-code-hooks.json

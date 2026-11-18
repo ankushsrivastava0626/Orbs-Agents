@@ -1,1 +1,1 @@
-{"mcpServers": {"voice": {"command": "/usr/bin/python3", "args": ["/Users/kush/.claude/voice/voice_mcp.py"]}}}
+{"mcpServers": {"voice": {"command": "/bin/sh", "args": ["-c", "exec /usr/bin/python3 \"$HOME/.claude/voice/voice_mcp.py\""]}}}
