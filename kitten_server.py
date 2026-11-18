@@ -942,7 +942,7 @@ def is_noise(text):
     t = re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()     # digits stay: "2" answers a numbered question
     return not t or t in NOISE
 
-def deliver(path, as_note=False, target=None, gate=0.15):
+def deliver(path, as_note=False, target=None, gate=0.15, newest=None):
     """Transcribe a recorded utterance and send it to its session (`target`: the orb you were holding when you let
     go) — but only if you actually said something: silence, a cough or a breath is dropped before anything is
     sent. If transcription fails the recording is kept in failed/ and the orb says why."""
@@ -960,11 +960,20 @@ def deliver(path, as_note=False, target=None, gate=0.15):
         try: os.unlink(path)
         except OSError: pass
         return ""
-    STATUS["transcribing"] = True
+    def superseded():                                    # a newer recording to the same orb interrupts this one
+        if newest and not newest():
+            print("ptt: an older recording was interrupted by a newer one to the same orb", flush=True)
+            try: os.unlink(path)
+            except OSError: pass
+            return True
+        return False
+    if superseded(): return ""
+    with _transcribing_lock: _transcribing[0] += 1; STATUS["transcribing"] = True
     try:
         text = transcribe(path)
     finally:
-        STATUS["transcribing"] = False
+        with _transcribing_lock: _transcribing[0] -= 1; STATUS["transcribing"] = _transcribing[0] > 0
+    if superseded(): return ""
     if text is None:                                     # failed: keep what you said, don't throw it away
         keep = os.path.join(DIR, "failed"); os.makedirs(keep, exist_ok=True)
         try: os.replace(path, os.path.join(keep, time.strftime("%Y-%m-%d %H-%M-%S") + ".wav"))
@@ -983,15 +992,27 @@ def deliver(path, as_note=False, target=None, gate=0.15):
         STATUS.update(heard=text, heard_at=time.time())
     return text
 
-deliveries = queue.Queue()                           # held recordings, transcribed and sent one at a time, in order
+_transcribing, _transcribing_lock = [0], threading.Lock()   # how many recordings are being transcribed right now
+LATEST, _latest_lock = {}, threading.Lock()                  # orb (or notes) -> number of its newest recording
 
-def delivery_worker():
-    while True:
-        args = deliveries.get()
-        try: deliver(*args)
+def dest_key(as_note, to):
+    return "__notes__" if as_note or STATUS["notes"] else (to[0] if to else STATUS.get("target") or "voice")
+
+def claim_latest(key):
+    """A new hold to this orb (or notes) became real: from now on it's the newest; older unsent ones are interrupted."""
+    with _latest_lock:
+        n = LATEST.get(key, 0) + 1; LATEST[key] = n
+    return n
+
+def deliver_latest(path, as_note, to, n=None):
+    """A held recording: transcribed and sent at once. A newer hold to the same orb interrupts it (it's dropped)
+    if it hasn't been sent yet; recordings to different orbs don't affect each other."""
+    key = dest_key(as_note, to)
+    if n is None: n = claim_latest(key)
+    def run():
+        try: deliver(path, as_note, to, newest=lambda: LATEST.get(key) == n)
         except Exception as e: print("deliver failed:", repr(e)[:200], flush=True)
-
-threading.Thread(target=delivery_worker, daemon=True).start()
+    threading.Thread(target=run, daemon=True).start()
 
 def mic_device():
     """Prefer the built-in mic: AirPods' mic flips them into low-quality call audio and hears less of the room."""
@@ -1119,7 +1140,7 @@ def command_watch():
     q.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
     q.CGEventSourceKeyState.restype = ctypes.c_bool
     q.CGEventSourceKeyState.argtypes = [ctypes.c_int32, ctypes.c_uint16]
-    held_since, stream, chunks = None, None, []
+    held_since, stream, chunks, hold_n = None, None, [], None
     while True:
         WATCH["beat"] = awake()
         # left Option only: Option mask + device-dependent left-Alt bit (NX_DEVICELALTKEYMASK 0x20; right is 0x40)
@@ -1134,7 +1155,7 @@ def command_watch():
             PTT["down"] = down = False
         STATUS["ptt"] = held_since is not None
         if down and held_since is None:
-            held_since, chunks = now, []
+            held_since, chunks, hold_n = now, [], None
             try:   # start capturing right away so the first word isn't clipped
                 def on_audio(d, f, t, st, chunks=chunks):         # this hold's list, even if the next one starts
                     chunks.append(d.copy())
@@ -1149,6 +1170,7 @@ def command_watch():
             if not STATUS["listening"]:
                 gen += 1                   # a real hold: Joe stops and his queue is dropped
                 abort_all()
+                hold_n = claim_latest(dest_key(PTT.get("notes", False), (STATUS.get("target"), STATUS.get("target_kind"))))
             STATUS["listening"] = True
         elif not down and held_since is not None:
             held = now - held_since
@@ -1162,7 +1184,7 @@ def command_watch():
                 f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
                 sf.write(f.name, audio, 16000)
                 to = (STATUS.get("target") or "voice", STATUS.get("target_kind"))   # the orb you held, now
-                deliveries.put((f.name, PTT.get("notes", False), to))
+                deliver_latest(f.name, PTT.get("notes", False), to, hold_n)
         time.sleep(0.03)
 
 def drain_spool():
@@ -1523,15 +1545,21 @@ def openrouter(messages, max_tokens=4000):
 
 ai_pool = None
 
+PROMPT_RUN = {"gen": 0, "futs": []}           # the newest batch of lines; older batches are interrupted
+
 def apply_prompt(new):
     """Run the board's prompt on each new turn (consecutive lines from one speaker), with the speaker and
-    time, plus the last few turns for context. Replies land on the board under what they answer."""
+    time, plus the last few turns for context. Replies land on the board under what they answer.
+    A newer batch of lines interrupts the older one: its waiting answers are cancelled, late ones dropped."""
     global ai_pool
     prompt, folder = LIVE["prompt"].strip(), LIVE["folder"]
     if not prompt or not new: return
     if ai_pool is None:
         from concurrent.futures import ThreadPoolExecutor
         ai_pool = ThreadPoolExecutor(3)
+    for f in PROMPT_RUN["futs"]: f.cancel()       # not started yet: never will
+    PROMPT_RUN["gen"] += 1; PROMPT_RUN["futs"] = []
+    my = PROMPT_RUN["gen"]
     turns = []
     for g in new:
         if turns and turns[-1]["speaker"] == g["speaker"]: turns[-1]["text"] += " " + g["text"]
@@ -1540,6 +1568,7 @@ def apply_prompt(new):
         if len(t["text"].split()) < 3: continue                 # "Yeah." / "Okay." aren't worth a reply
         context = transcript_lines(LIVE["segs"], upto=t["start"])[-8:-1]
         def run(t=t, context=context):
+            if PROMPT_RUN["gen"] != my: return          # interrupted before it started
             try:
                 reply = openrouter([
                     {"role": "system", "content": "You help during a live meeting. The user's instruction is applied to one "
@@ -1551,11 +1580,13 @@ def apply_prompt(new):
                         + f"Just said:\n[{_ts(t['start'])}] {t['speaker']}: {t['text']}"}])
             except Exception as e:
                 print("meeting board: prompt failed:", repr(e)[:200], flush=True); return
+            if PROMPT_RUN["gen"] != my:                 # interrupted while it was being answered
+                print("meeting board: an older line's answer was interrupted by newer lines", flush=True); return
             if reply and reply != "-" and LIVE["folder"] == folder:
                 LIVE["ai"].append({"at": t["start"], "speaker": t["speaker"], "said": t["text"], "reply": reply, "prompt": prompt})
                 LIVE["ai"].sort(key=lambda a: a["at"])
                 live_save(folder)
-        ai_pool.submit(run)
+        PROMPT_RUN["futs"].append(ai_pool.submit(run))
 
 def meeting_ask(q):
     """One question about the meeting so far (the whole transcript, with speakers and times); one answer."""
@@ -1676,17 +1707,14 @@ def card_delete(cid):
     task_save()
 
 def task_start(cid="", new=False):
-    if TASK["recording"] or TASK.get("pending"): return
-    if TASK["transcribing"]:                      # the last one is still being written down: start right after it
-        TASK["pending"] = (cid, new)
-        def later():
-            for _ in range(900):                  # up to 90 s
-                if not TASK["transcribing"]: break
-                time.sleep(0.1)
-            p = TASK.pop("pending", None)
-            if p and not TASK["transcribing"]: _task_start_now(*p)
-        threading.Thread(target=later, daemon=True).start()
-        return
+    """Start recording onto a card. If the last recording is still being written down, this one interrupts it: the
+    old card keeps what was already transcribed, the rest of it is dropped, and this one starts right now."""
+    if TASK["recording"]: return
+    old = TASK.get("finishing")
+    if TASK["transcribing"] and old:
+        old["abandoned"] = True
+        TASK.update(transcribing=False, live="")
+        print("task board: a new recording interrupts the one being transcribed", flush=True)
     _task_start_now(cid, new)
 
 def _task_start_now(cid, new):
@@ -1698,22 +1726,25 @@ def _task_start_now(cid, new):
     proc = subprocess.Popen([sys.executable, REC, os.path.join(folder, "audio.wav"), config().get("VOICE_MIC", "MacBook")],
                             stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
                             start_new_session=True)
-    TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, card=c["id"], live="", proc=proc,
-                off=WAV_HEADER, pieces=[], failed=False)
-    TASK["live_thread"] = threading.Thread(target=task_live, args=(folder,), daemon=True)
-    TASK["live_thread"].start()
+    # each recording keeps its own state: one being finished can't mix with the next
+    R = {"folder": folder, "card": c["id"], "pid": proc.pid, "proc": proc, "off": WAV_HEADER, "pieces": [],
+         "failed": False, "abandoned": False}
+    TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, card=c["id"], live="", cur=R)
+    R["live_thread"] = threading.Thread(target=task_live, args=(R,), daemon=True)
+    R["live_thread"].start()
     write_json(TASK_ACTIVE, {"pid": proc.pid, "folder": folder, "card": c["id"]})   # a restart finishes it
     print("task board: recording to", folder, "for card", c["id"], flush=True)
 
-def task_piece(folder, final=False):
+def task_piece(R, final=False):
     """Transcribe the audio recorded since the last piece (cut at the quietest moment of its last 1.5 s,
-    so words aren't split) and add it to what's been said. Each second of audio is sent once."""
-    wav = os.path.join(folder, "audio.wav")
+    so words aren't split) and add it to what's been said. Each second of audio is sent once.
+    The last piece (final) is returned instead of added: an interrupted recording drops it."""
+    wav = os.path.join(R["folder"], "audio.wav")
     try: size = os.path.getsize(wav)
-    except OSError: return
+    except OSError: return ""
     end = size - (size - WAV_HEADER) % 2
-    off = TASK.get("off", WAV_HEADER)
-    if end - off < (3200 if final else 3 * 32000): return      # live: at least 3 s of new audio; at the end, any
+    off = R["off"]
+    if end - off < (3200 if final else 3 * 32000): return ""   # live: at least 3 s of new audio; at the end, any
     with open(wav, "rb") as f:
         f.seek(off); x = np.frombuffer(f.read(end - off), dtype="<i2")
     cut = len(x)
@@ -1722,66 +1753,67 @@ def task_piece(folder, final=False):
         e = [float(np.mean(tail[i:i + 1600] ** 2)) for i in range(0, len(tail) - 1600, 1600)]
         cut = len(x) - 24000 + int(np.argmin(e)) * 1600 + 800
     x = x[:cut]
-    if speech_seconds_pcm(x) < (0.1 if final else 0.3): TASK["off"] = off + 2 * cut; return   # silence: nothing to pay for
+    if speech_seconds_pcm(x) < (0.1 if final else 0.3): R["off"] = off + 2 * cut; return ""   # silence: nothing to pay for
     t = stt_text_pcm(x)
     if t is None:                                               # failed: live, try this audio again next pass
-        if final: TASK["failed"] = True                         # at the end: keep the audio, say so
-        return
-    TASK["off"] = off + 2 * cut
+        if final: R["failed"] = True                            # at the end: keep the audio, say so
+        return ""
+    R["off"] = off + 2 * cut
     if t:
-        prev = TASK["pieces"][-1] if TASK["pieces"] else ""
+        prev = R["pieces"][-1] if R["pieces"] else ""
         if prev and prev[-1] not in ".!?" and t[:1].isupper() and not t[:2].isupper():   # mid-sentence join
             t = t[0].lower() + t[1:]
-        TASK["pieces"].append(t); TASK["live"] = " ".join(TASK["pieces"])
+        if final: return t
+        R["pieces"].append(t)
+        if TASK.get("cur") is R: TASK["live"] = " ".join(R["pieces"])
+    return ""
 
-def task_live(folder):
+def task_live(R):
     """While recording: every few seconds, the new audio is transcribed and added, so your words show up."""
-    while TASK["recording"] and TASK["folder"] == folder:
+    while TASK["recording"] and TASK.get("cur") is R:
         time.sleep(4)
-        if not TASK["recording"]: break
-        task_piece(folder)
+        if not TASK["recording"] or TASK.get("cur") is not R: break
+        task_piece(R)
 
 def task_stop():
-    if TASK.pop("pending", None): return         # let go before it could start
-    if not TASK["recording"]: return
-    pid, folder, cid = TASK["pid"], TASK["folder"], TASK["card"]
-    TASK.update(recording=False, transcribing=True)
+    R = TASK.get("cur")
+    if not TASK["recording"] or not R: return
+    TASK.update(recording=False, transcribing=True, finishing=R)
     def finish():
+        pid, folder, cid = R["pid"], R["folder"], R["card"]
         try: os.kill(pid, signal.SIGTERM)
         except OSError: pass
         for _ in range(100):
             if not _alive(pid): break
-            p = TASK.get("proc")
-            if p: p.poll()
+            R["proc"].poll()
             time.sleep(0.1)
         if _alive(pid):
             try: os.kill(pid, signal.SIGKILL)
             except OSError: pass
         wav = os.path.join(folder, "audio.wav")
-        lt = TASK.get("live_thread")
-        if lt: lt.join(timeout=60)                    # let a live pass in flight finish first
-        try:
-            task_piece(folder, final=True)               # only what hasn't been transcribed yet
-            text = " ".join(TASK.get("pieces") or []).strip()
-        finally:
+        R["live_thread"].join(timeout=60)             # let a live pass in flight finish first
+        last = "" if R["abandoned"] else task_piece(R, final=True)   # only what hasn't been transcribed yet
+        interrupted = R["abandoned"]                  # (a new recording may have cut in while that ran)
+        text = " ".join(R["pieces"] + ([last] if last and not interrupted else [])).strip()
+        if TASK.get("finishing") is R:
             TASK.update(transcribing=False, live="")
         c = card(cid)
-        failed = TASK.get("failed")
         if text and c:                              # a second recording on a card adds to it
             c["original"] = (c["original"].rstrip() + "\n\n" + text).strip() if c["original"] else text
             open(os.path.join(folder, "original.txt"), "w").write(text)
-        if failed:                                  # (part of) it couldn't be transcribed: keep the audio
+        if R["failed"] and not interrupted:         # (part of) it couldn't be transcribed: keep the audio
             subprocess_repair(wav)
             tell("Part of your task recording couldn't be transcribed; the audio is kept in " + folder)
         elif text:
             try: os.unlink(wav)                     # the words are kept; the audio isn't needed
             except OSError: pass
-        else:                                       # nothing said: leave nothing behind
+        else:                                       # nothing said (or cut off before any words): leave nothing behind
             import shutil; shutil.rmtree(folder, ignore_errors=True)
-        try: os.unlink(TASK_ACTIVE)
-        except OSError: pass
+        try:
+            if json.load(open(TASK_ACTIVE)).get("folder") == folder: os.unlink(TASK_ACTIVE)   # not the next one's
+        except Exception: pass
         task_save()
-        print("task board: transcribed", len(text), "chars", flush=True)
+        print("task board:", "interrupted," if interrupted else "transcribed", len(text), "chars", flush=True)
     threading.Thread(target=finish, daemon=True).start()
 
 def task_ask(cid, prompt):
