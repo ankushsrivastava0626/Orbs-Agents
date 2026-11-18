@@ -114,7 +114,7 @@ lock = open(os.path.join(v, ".launch.lock"), "w"); fcntl.flock(lock, fcntl.LOCK_
 def save(path, data):
     json.dump(data, open(path + ".tmp", "w"), indent=1); os.replace(path + ".tmp", path)
 if name == "voice":
-    json.dump({"id": sid, "cwd": cwd, "started": time.time()}, open(os.path.join(v, "session.json"), "w"))
+    save(os.path.join(v, "session.json"), {"id": sid, "cwd": cwd, "started": time.time()})
 # orbs.json: one entry per orb/session, read by the pet
 op = os.path.join(v, "orbs.json")
 try: orbs = json.load(open(op))
@@ -141,7 +141,7 @@ lst = [s for s in lst if s["id"] != sid] + [{"id": sid, "cwd": cwd, "started": t
 save(p, lst[-500:])
 PY
 [ -n "$AGENT" ] && [ -n "$AM" ] && MODEL_ARG="--model '$AM'"   # the design's model, also on resume
-$TMUX_BIN kill-session -t "$NAME" 2>/dev/null
+$TMUX_BIN kill-session -t "=$NAME" 2>/dev/null          # exact name: "voice" must not hit "voice-2"
 if [ -z "$CMD" ]; then
   $TMUX_BIN new-session -d -s "$NAME" -x 200 -y 50 -c "$CWD" \
     "export PATH='$PATH'; VOICE_SESSION=1 VOICE_SESSION_NAME=$NAME $HOME/.local/bin/claude --chrome --name $NAME $SESS $MODEL_ARG --mcp-config $V/voice-mcp.json $AGENT_ARGS --append-system-prompt \"\$(cat '$PROMPT')\""

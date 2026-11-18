@@ -12,6 +12,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 DIR = os.path.expanduser("~/.claude/voice")
 PORT = 5123
 
+_write_lock = threading.Lock()
+
+def write_json(path, obj, **kw):
+    """Write JSON whole or not at all: to a temp file, then swapped in."""
+    with _write_lock:
+        tmp = f"{path}.{threading.get_ident()}.tmp"
+        with open(tmp, "w") as f: json.dump(obj, f, **kw)
+        os.replace(tmp, path)
+
 def set_config(key, value):
     """Change one setting in the config file, keeping its comment (or add it at the top)."""
     path = os.path.join(DIR, "config")
@@ -164,7 +173,8 @@ def follow_output_device():
     """Earphones plugged in / AirPods connected since we last spoke: PortAudio still points at the old
     device, so Joe would come out of the speakers (and ignore the volume keys). Re-read devices first."""
     cur = default_output_id()
-    if cur is not None and _last_out[0] is not None and cur != _last_out[0] and not PTT.get("down"):
+    if cur is not None and _last_out[0] is not None and cur != _last_out[0]:
+        if PTT.get("down"): return                       # not while you hold a key: next time
         refresh_audio()
     if cur is not None: _last_out[0] = cur
 
@@ -196,6 +206,7 @@ def speak_fish(text, cfg, my_gen):
     key = openrouter_key()
     still = lambda: my_gen == gen
     pieces = queue.Queue(maxsize=64)                 # audio bytes, None between sentences, "END" or an error at the end
+    gone = threading.Event()                         # the player is done (finished, stopped or failed)
     def fetch():
         try:
             for part in fish_chunks(text):
@@ -206,14 +217,19 @@ def speak_fish(text, cfg, my_gen):
                 req = urllib.request.Request("https://openrouter.ai/api/v1/audio/speech", method="POST",
                     data=json.dumps(body).encode(), headers={"Authorization": "Bearer " + key,
                     "Content-Type": "application/json", "X-Title": "VoicePet Joe"})
-                with urllib.request.urlopen(req, timeout=30) as r:
+                with or_open(req, 30) as r:
                     while still():
                         b = r.read(8820)                 # ~0.1 s of audio
                         if not b: break
-                        pieces.put(b)
-            pieces.put("END")
+                        if not put(b): return
+            put("END")
         except Exception as e:
-            pieces.put(e)
+            put(e)
+    def put(x):                                          # the player may have stopped: then give up, don't wait forever
+        while still() and not gone.is_set():
+            try: pieces.put(x, timeout=0.5); return True
+            except queue.Full: continue
+        return False
     threading.Thread(target=fetch, daemon=True).start()
     player = Player(float(cfg.get("FISH_SPEED", "1.0")), rate=FISH_RATE)
     set_tts_player(player)
@@ -231,6 +247,7 @@ def speak_fish(text, cfg, my_gen):
         if still(): player.write(b"", final=True)
         return True
     finally:
+        gone.set()
         set_tts_player(None)
         player.close()
 
@@ -297,65 +314,74 @@ def reseed_loop():
 
 threading.Thread(target=reseed_loop, daemon=True).start()
 
+def speak_job(my_gen, text, kind, who):
+    """One line of Joe's: remember it, show it (muted orbs) or speak it."""
+    try: follow_output_device()
+    except Exception as e: print("output check failed:", repr(e), flush=True)
+    STATUS["speaking_session"] = who
+    if kind == "SAY":                                     # remember each orb's last reply (hover shows it)
+        STATUS["last_said"][who or "voice"] = {"id": f"s{time.time():.3f}", "session": who or "voice",
+                                               "text": text, "at": time.time(), "sid": orb_conversation(who or "voice")}
+        try: write_json(LAST_SAID, dict(STATUS["last_said"]))   # kept through server restarts
+        except (OSError, RuntimeError, TypeError): pass
+    if kind == "SAY" and (who or "voice") in STATUS["muted_sessions"]:
+        # muted orb: show the reply as text instead of speaking it
+        STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
+                                                      "text": text, "at": time.time()}])[-10:]
+        return
+    if my_gen != gen:
+        return
+    cfg = config()
+    engine = cfg.get("ENGINE", "gemini")
+    try:
+        if engine == "fish":                     # Joe is Fish Drama 3; no backup voice
+            STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
+            try:
+                speak_fish(text, cfg, my_gen)
+                return
+            except Exception as e:
+                print("fish failed:", repr(e)[:200], flush=True)
+            # Fish failed: amber dot, and the reply shows as text on its orb so nothing is lost
+            STATUS["problem_at"] = time.time()
+            if kind == "SAY":
+                STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
+                                                              "text": text, "at": time.time()}])[-10:]
+            return
+        if engine != "kitten":                   # Joe is Gemini; there is no backup voice
+            if gemini_ok():
+                STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
+                if speak_gemini(text, kind, cfg, my_gen):
+                    return
+            # Gemini failed: amber dot, and the reply shows as text on its orb so nothing is lost
+            STATUS["problem_at"] = time.time()
+            if kind == "SAY":
+                STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
+                                                              "text": text, "at": time.time()}])[-10:]
+            print("gemini unavailable; shown as text:", text[:80], flush=True)
+            return
+        # legacy Kitten engine
+        clips = []
+        for snt in sentences(text):
+            try:
+                clips += [synth(snt, cfg), GAP]
+            except Exception as e:
+                print("synth error:", e, flush=True)
+        if not clips or my_gen != gen:
+            return
+        STATUS.update(speaking=True, spoken=text)
+        sd.play(np.concatenate(clips[:-1]), SR)
+        sd.wait()
+    except Exception as e:
+        print("worker error:", repr(e)[:200], flush=True)
+    finally:
+        STATUS["speaking"] = False
+
 def worker():
     while True:
-        my_gen, text, kind, who = jobs.get()
-        try: follow_output_device()
-        except Exception as e: print("output check failed:", repr(e), flush=True)
-        STATUS["speaking_session"] = who
-        if kind == "SAY":                                     # remember each orb's last reply (hover shows it)
-            STATUS["last_said"][who or "voice"] = {"id": f"s{time.time():.3f}", "session": who or "voice",
-                                                   "text": text, "at": time.time(), "sid": orb_conversation(who or "voice")}
-            try: json.dump(STATUS["last_said"], open(LAST_SAID, "w"))   # kept through server restarts
-            except OSError: pass
-        if kind == "SAY" and (who or "voice") in STATUS["muted_sessions"]:
-            # muted orb: show the reply as text instead of speaking it
-            STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
-                                                          "text": text, "at": time.time()}])[-10:]
-            continue
-        if my_gen != gen:
-            continue
-        cfg = config()
-        engine = cfg.get("ENGINE", "gemini")
+        job = jobs.get()
         try:
-            if engine == "fish":                     # Joe is Fish Drama 3; no backup voice
-                STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
-                try:
-                    speak_fish(text, cfg, my_gen)
-                    continue
-                except Exception as e:
-                    print("fish failed:", repr(e)[:200], flush=True)
-                # Fish failed: amber dot, and the reply shows as text on its orb so nothing is lost
-                STATUS["problem_at"] = time.time()
-                if kind == "SAY":
-                    STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
-                                                                  "text": text, "at": time.time()}])[-10:]
-                continue
-            if engine != "kitten":                   # Joe is Gemini; there is no backup voice
-                if gemini_ok():
-                    STATUS.update(speaking=True, spoken=text if kind == "SAY" else "")
-                    if speak_gemini(text, kind, cfg, my_gen):
-                        continue
-                # Gemini failed: amber dot, and the reply shows as text on its orb so nothing is lost
-                STATUS["problem_at"] = time.time()
-                if kind == "SAY":
-                    STATUS["captions"] = (STATUS["captions"] + [{"id": f"{time.time():.3f}", "session": who or "voice",
-                                                                  "text": text, "at": time.time()}])[-10:]
-                print("gemini unavailable; shown as text:", text[:80], flush=True)
-                continue
-            # legacy Kitten engine
-            clips = []
-            for snt in sentences(text):
-                try:
-                    clips += [synth(snt, cfg), GAP]
-                except Exception as e:
-                    print("synth error:", e, flush=True)
-            if not clips or my_gen != gen:
-                continue
-            STATUS.update(speaking=True, spoken=text)
-            sd.play(np.concatenate(clips[:-1]), SR)
-            sd.wait()
-        except Exception as e:
+            speak_job(*job)
+        except Exception as e:                           # never let one bad line end Joe's voice for good
             print("worker error:", repr(e)[:200], flush=True)
         finally:
             STATUS["speaking"] = False
@@ -363,8 +389,21 @@ def worker():
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _ok(self, body=b"ok"):
-        self.send_response(200); self.end_headers(); self.wfile.write(body)
+        try:
+            self.send_response(200); self.end_headers(); self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass                                         # the pet stopped waiting (its polls time out fast): fine
+    def _local(self):
+        """Only programs on this Mac: a web page could otherwise POST here (type into a session, start the mic).
+        Browsers always send Origin on cross-site requests; and the Host check stops DNS rebinding."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        if self.headers.get("Origin") or host not in ("127.0.0.1", "localhost", ""):
+            try: self.send_response(403); self.end_headers()
+            except OSError: pass
+            return False
+        return True
     def do_GET(self):
+        if not self._local(): return
         if self.path == "/status":
             c = config()
             STATUS.update(stt_engine=c.get("STT_ENGINE", "cloud"), voice_engine=c.get("ENGINE", "fish"))
@@ -379,6 +418,7 @@ class H(BaseHTTPRequestHandler):
             self._ok(MODEL_NAME.encode())
     def do_POST(self):
         global gen
+        if not self._local(): return
         body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8", "replace")
         if self.path == "/event":       # from Claude hooks: {"claude": "working"|"idle", "step": "...", "voice": true}
             try:
@@ -396,15 +436,17 @@ class H(BaseHTTPRequestHandler):
             import subprocess
             m = re.search(r"[?&]s=([^&]+)", self.path)
             target = m.group(1) if m else (STATUS.get("target") or "voice")
-            gen += 1; abort_all()                                   # silence Joe either way
+            if not self.path.startswith("/claude/show"):          # stop / quit silence Joe; showing it doesn't
+                gen += 1; abort_all()
             if self.path.startswith("/claude/stop"):                # interrupt the current task (Esc twice)
                 for _ in range(2):
-                    subprocess.run([TMUX, "send-keys", "-t", target, "Escape"]); time.sleep(0.15)
+                    subprocess.run([TMUX, "send-keys", "-t", tmux_target(target), "Escape"]); time.sleep(0.15)
             elif self.path.startswith("/claude/quit"):              # end the voice session entirely
-                subprocess.run([TMUX, "kill-session", "-t", target])
+                subprocess.run([TMUX, "kill-session", "-t", "=" + target])
             else:                                                   # open a Terminal window on it
-                if subprocess.run([TMUX, "has-session", "-t", target], capture_output=True).returncode == 0:
-                    subprocess.run(["osascript", "-e", f'tell application "Terminal" to do script "{TMUX} attach -t {target}"'])
+                if subprocess.run([TMUX, "has-session", "-t", "=" + target], capture_output=True).returncode == 0:
+                    cmd = ["osascript", "-e", f'tell application "Terminal" to do script "{TMUX} attach -t ={target}"']
+                    threading.Thread(target=subprocess.run, args=(cmd,), daemon=True).start()   # Terminal can take a while
             STATUS.update(voice_claude="idle", voice_claude_at=time.time(), claude="idle", step="")
             if not self.path.startswith("/claude/show"):          # the orb itself reads its own entry
                 STATUS["sessions"][target] = {"state": "idle", "step": "", "at": time.time()}
@@ -527,6 +569,42 @@ class H(BaseHTTPRequestHandler):
         self._ok()
 
 STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
+def or_open(req, timeout):
+    """urlopen for OpenRouter, once more after a network blip or a server-side error (5xx, 429). It's a retry of
+    the same thing, not a fallback. Raises the last error."""
+    import urllib.request, urllib.error
+    for attempt in (1, 2):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if attempt == 1 and (e.code >= 500 or e.code == 429): time.sleep(1.5); continue
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == 1: time.sleep(1.5); continue
+            raise
+
+def or_problem(e):
+    """An OpenRouter failure in words (for the orb) and in detail (for the log)."""
+    code, detail = getattr(e, "code", None), repr(e)
+    if hasattr(e, "read"):
+        try: detail = e.read().decode("utf-8", "replace")
+        except Exception: pass
+    msg = ("OpenRouter is out of credits: add some at openrouter.ai/settings/credits" if code == 402
+           else "OpenRouter rejected the API key" if code in (401, 403)
+           else "No connection to OpenRouter" if code is None
+           else f"OpenRouter error {code}")
+    return msg, detail[:200]
+
+_told = {}
+
+def tell(msg):
+    """Show a problem as a card on the orb you're talking to (the amber dot alone doesn't say what's wrong)."""
+    STATUS["problem_at"] = time.time()
+    if time.time() - _told.get(msg, 0) < 120: return              # the same problem: once every 2 min
+    _told[msg] = time.time()
+    who = STATUS.get("target") or "voice"
+    STATUS["captions"] = (STATUS["captions"] + [{"id": f"p{time.time():.3f}", "session": who, "text": msg, "at": time.time()}])[-10:]
+
 # every OpenRouter request: only providers that keep nothing (zero data retention) and don't train on it,
 # fastest first (highest throughput)
 PRIVATE = {"zdr": True, "data_collection": "deny", "sort": "throughput"}
@@ -542,10 +620,10 @@ def stt_api(wav_bytes, fmt="wav", verbose=False):
     try:
         req = urllib.request.Request(STT_URL, method="POST", data=json.dumps(body).encode(),
             headers={"Authorization": "Bearer " + openrouter_key(), "Content-Type": "application/json", "X-Title": "VoicePet"})
-        d = json.loads(urllib.request.urlopen(req, timeout=300).read())
+        d = json.loads(or_open(req, 300).read())
     except Exception as e:
-        msg = e.read()[:200] if hasattr(e, "read") else repr(e)[:200]
-        print("stt: failed:", msg, flush=True); STATUS["problem_at"] = time.time(); return None
+        msg, detail = or_problem(e)
+        print("stt: failed:", detail, flush=True); tell("Couldn't transcribe: " + msg); return None
     if time.time() - t > 5: print(f"stt: slow transcription ({time.time() - t:.1f}s)", flush=True)
     return d
 
@@ -569,10 +647,10 @@ def stt_meeting(audio, filename):
     try:
         req = urllib.request.Request(STT_URL, method="POST", data=body, headers={"Authorization": "Bearer " + openrouter_key(),
                                      "Content-Type": "multipart/form-data; boundary=" + b, "X-Title": "VoicePet meetings"})
-        d = json.loads(urllib.request.urlopen(req, timeout=1800).read())
+        d = json.loads(or_open(req, 1800).read())
     except Exception as e:
-        msg = e.read()[:200] if hasattr(e, "read") else repr(e)[:200]
-        print("meeting stt: failed:", msg, flush=True); STATUS["problem_at"] = time.time(); return None
+        msg, detail = or_problem(e)
+        print("meeting stt: failed:", detail, flush=True); tell("Couldn't transcribe the meeting: " + msg); return None
     print(f"meeting stt: {d.get('duration', 0):.0f} s of audio in {time.time() - t:.1f}s, ${(d.get('usage') or {}).get('cost', 0):.4f}", flush=True)
     segs, cur, names = [], None, {}
     for w in d.get("words") or []:
@@ -679,12 +757,14 @@ def warm_local():
 
 # ---- whichever engine is picked ----
 def transcribe(path):
+    """The words in a recording; "" if nothing was said, None if transcription failed."""
     if stt_local():
-        return ((local_cli(path) or {}).get("rawTranscript") or "").strip()
+        d = local_cli(path)
+        return None if d is None else (d.get("rawTranscript") or "").strip()
     try: data = open(path, "rb").read()
     except OSError: return ""
     d = stt_api(data)
-    return ((d or {}).get("text") or "").strip()
+    return None if d is None else (d.get("text") or "").strip()
 
 def stt_text_pcm(x):
     """Text for int16 samples, or None on failure."""
@@ -706,7 +786,7 @@ def ensure_voice_session():
     import subprocess
     target = config().get("VOICE_TMUX_TARGET", "voice")
     def running():
-        return subprocess.run([TMUX, "has-session", "-t", target], capture_output=True).returncode == 0
+        return subprocess.run([TMUX, "has-session", "-t", "=" + target], capture_output=True).returncode == 0
     def ready():
         out = subprocess.run([TMUX, "capture-pane", "-pt", target], capture_output=True, text=True).stdout
         return "\u276f" in out                     # Claude Code's input prompt
@@ -756,24 +836,32 @@ def send_to_codex(text):
     except Exception as e:
         print("codex input failed:", repr(e), flush=True); STATUS["problem_at"] = time.time()
 
-def send_to_claude(text):
+def tmux_target(name):
+    """tmux matches a session by prefix ("voice" would hit "voice-2" when "voice" is gone): exact names only."""
+    return "=" + name + ":"
+
+def send_to_claude(text, to=None):
+    """Type `text` into a session: `to` = (name, kind) of the orb you were holding, else whichever is selected now."""
     import subprocess
-    if STATUS.get("target_kind") == "codex":
+    target, kind = to or (STATUS.get("target") or "voice", STATUS.get("target_kind"))
+    if kind == "codex":
         send_to_codex(text); return
-    target = STATUS.get("target") or "voice"
+    target = target or "voice"
     if target != "voice":                                  # extra sessions: must already be running
-        if subprocess.run([TMUX, "has-session", "-t", target], capture_output=True).returncode != 0:
+        if subprocess.run([TMUX, "has-session", "-t", "=" + target], capture_output=True).returncode != 0:
             print("session", target, "is not running", flush=True); STATUS["problem_at"] = time.time(); return
     elif not ensure_voice_session():
         STATUS["problem_at"] = time.time()
         return
     st = STATUS["sessions"].get(target, {})
     if st.get("state") == "working" and time.time() - st.get("at", 0) < 1800:
-        subprocess.run([TMUX, "send-keys", "-t", target, "Escape"])   # a new command interrupts the running task
+        subprocess.run([TMUX, "send-keys", "-t", tmux_target(target), "Escape"])   # a new command interrupts the running task
         time.sleep(0.6)
         print("interrupted", target, "for a new command", flush=True)
-    subprocess.run([TMUX, "send-keys", "-t", target, "-l", text])
-    subprocess.run([TMUX, "send-keys", "-t", target, "Enter"])
+    r = subprocess.run([TMUX, "send-keys", "-t", tmux_target(target), "-l", "--", text], capture_output=True, text=True)
+    if r.returncode != 0:
+        print("send failed:", r.stderr.strip()[:200], "->", target, flush=True); tell(f"Couldn't type into {target}"); return
+    subprocess.run([TMUX, "send-keys", "-t", tmux_target(target), "Enter"])
     print("sent:", text, "->", target, flush=True)
     STATUS.update(voice_claude="working", voice_claude_at=time.time())
     STATUS["sessions"][target] = {"state": "working", "step": "", "at": time.time()}
@@ -849,17 +937,23 @@ def _voiced(audio, sr):
     return voiced * n / sr
 
 def is_noise(text):
-    t = re.sub(r"[^a-z ]", "", text.lower()).strip()
+    t = re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()     # digits stay: "2" answers a numbered question
     return not t or t in NOISE
 
-def deliver(path, as_note=False):
-    """Transcribe a recorded utterance and send it to its session — but only if you actually said something:
-    silence, a cough or a breath is dropped before anything is sent (so nothing gets started by accident)."""
+def deliver(path, as_note=False, target=None, gate=0.15):
+    """Transcribe a recorded utterance and send it to its session (`target`: the orb you were holding when you let
+    go) — but only if you actually said something: silence, a cough or a breath is dropped before anything is
+    sent. If transcription fails the recording is kept in failed/ and the orb says why."""
     try:
         voiced = speech_seconds(path)
     except Exception as e:
         print("speech check failed:", repr(e), flush=True); voiced = 1.0
-    if voiced < 0.35:
+    if voiced < gate:
+        try:
+            import soundfile as sf
+            if float(np.abs(sf.read(path, dtype="float32")[0]).max(initial=0)) == 0.0:   # not quiet: digital zero
+                tell("The mic recorded pure silence: check the input device (VOICE_MIC in config) or that the lid is open")
+        except Exception: pass
         print(f"dropped: no speech ({voiced:.2f}s voiced)", flush=True)
         try: os.unlink(path)
         except OSError: pass
@@ -869,7 +963,13 @@ def deliver(path, as_note=False):
         text = transcribe(path)
     finally:
         STATUS["transcribing"] = False
-        os.unlink(path)
+    if text is None:                                     # failed: keep what you said, don't throw it away
+        keep = os.path.join(DIR, "failed"); os.makedirs(keep, exist_ok=True)
+        try: os.replace(path, os.path.join(keep, time.strftime("%Y-%m-%d %H-%M-%S") + ".wav"))
+        except OSError: pass
+        return ""
+    try: os.unlink(path)
+    except OSError: pass
     if is_noise(text):
         if text: print("dropped: noise transcript:", repr(text), flush=True)
         return ""
@@ -877,9 +977,19 @@ def deliver(path, as_note=False):
         if STATUS["notes"] or as_note:
             propose_note(text)
         else:
-            send_to_claude(text)
+            send_to_claude(text, target)
         STATUS.update(heard=text, heard_at=time.time())
     return text
+
+deliveries = queue.Queue()                           # held recordings, transcribed and sent one at a time, in order
+
+def delivery_worker():
+    while True:
+        args = deliveries.get()
+        try: deliver(*args)
+        except Exception as e: print("deliver failed:", repr(e)[:200], flush=True)
+
+threading.Thread(target=delivery_worker, daemon=True).start()
 
 def mic_device():
     """Prefer the built-in mic: AirPods' mic flips them into low-quality call audio and hears less of the room."""
@@ -903,7 +1013,7 @@ def interrupt_claude():
     abort_all()
     if STATUS["voice_claude"] == "working":
         import subprocess
-        subprocess.run(["/opt/homebrew/bin/tmux", "send-keys", "-t", STATUS.get("target") or "voice", "Escape"])
+        subprocess.run(["/opt/homebrew/bin/tmux", "send-keys", "-t", tmux_target(STATUS.get("target") or "voice"), "Escape"])
         STATUS.update(voice_claude="idle", voice_claude_at=time.time())
     print("barge-in: interrupted", flush=True)
 
@@ -912,6 +1022,7 @@ def auto_listen():
     an utterance right away. While Joe talks or Claude works, the mic is ignored unless VOICE_BARGE_IN=on,
     in which case sustained louder-than-echo speech interrupts (Joe stops, Claude's turn is cancelled).
     An utterance ends after 0.8 s of silence, then it is transcribed and sent."""
+    while not STATUS["auto"]: time.sleep(0.5)  # torch and the detector load only once hands-free mode is used
     import tempfile, collections, torch
     import soundfile as sf
     from silero_vad import load_silero_vad
@@ -924,7 +1035,7 @@ def auto_listen():
         frames = queue.Queue()
         try:
             stream = sd.InputStream(device=mic_device(), samplerate=16000, channels=1, dtype="float32",
-                                    blocksize=CH, callback=lambda d, f, t, st: frames.put(d[:, 0].copy()))
+                                    blocksize=CH, callback=lambda d, f, t, st, frames=frames: frames.put(d[:, 0].copy()))
             stream.start()
         except Exception as e:
             print("auto mic error:", e, flush=True)
@@ -985,8 +1096,7 @@ def auto_listen():
                     if silent * CH / 16000 >= 0.8 or len(speech) * CH / 16000 > 30:
                         break                  # 0.8 s of silence ends the utterance (30 s cap)
         finally:
-            try: stream.stop(); stream.close()
-            except Exception: pass
+            close_stream(stream)
             STATUS.update(listening=False, level=0.0)
         if talking and voiced * CH / 16000 >= 0.3 and STATUS["auto"]:   # ignore coughs and clicks
             f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
@@ -1009,19 +1119,22 @@ def command_watch():
     q.CGEventSourceKeyState.argtypes = [ctypes.c_int32, ctypes.c_uint16]
     held_since, stream, chunks = None, None, []
     while True:
-        WATCH["beat"] = time.time()
-        fl = q.CGEventSourceFlagsState(1)
+        WATCH["beat"] = awake()
         # left Option only: Option mask + device-dependent left-Alt bit (NX_DEVICELALTKEYMASK 0x20; right is 0x40)
         if config().get("PTT_SOURCE", "pet") == "pet":
             down = PTT["down"]
         else:
+            fl = q.CGEventSourceFlagsState(1)
             down = bool(fl & 0x00080000) and bool(fl & 0x00000020)
         now = time.time()
+        if down and held_since is not None and now - held_since > 300:   # 5 min: a lost key-up, not a sentence
+            print("ptt: held over 5 min; finishing it", flush=True)
+            PTT["down"] = down = False
         STATUS["ptt"] = held_since is not None
         if down and held_since is None:
             held_since, chunks = now, []
             try:   # start capturing right away so the first word isn't clipped
-                def on_audio(d, f, t, st):
+                def on_audio(d, f, t, st, chunks=chunks):         # this hold's list, even if the next one starts
                     chunks.append(d.copy())
                     STATUS["level"] = min(1.0, float(np.sqrt(np.mean(d ** 2))) * 12)
                 stream = sd.InputStream(device=mic_device(), samplerate=16000, channels=1, dtype="float32",
@@ -1039,17 +1152,15 @@ def command_watch():
             held = now - held_since
             held_since = None
             STATUS.update(listening=False, level=0.0)
-            if stream:
-                try: stream.stop(); stream.close()
-                except Exception: pass
-                stream = None
+            close_stream(stream); stream = None
             cancelled = PTT.pop("cancel", False)
             if cancelled: print("ptt: cancelled (tap or shortcut)", flush=True)
             if held >= 0.6 and chunks and not cancelled:     # quick Option+key presses (special chars, Option+arrows) are ignored
                 audio = np.concatenate(chunks)[:, 0]
                 f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir="/tmp")
                 sf.write(f.name, audio, 16000)
-                threading.Thread(target=deliver, args=(f.name, PTT.get("notes", False)), daemon=True).start()
+                to = (STATUS.get("target") or "voice", STATUS.get("target_kind"))   # the orb you held, now
+                deliveries.put((f.name, PTT.get("notes", False), to))
         time.sleep(0.03)
 
 def drain_spool():
@@ -1092,7 +1203,7 @@ def meeting_start():
                             start_new_session=True)            # its own process group: our restarts don't kill it
     MEETING.update(on=True, started=time.time(), folder=folder, pid=proc.pid, proc=proc)
     LIVE.update(folder=folder, segs=[], offset=WAV_HEADER, final=False, ai=[], ask={"q": "", "a": "", "busy": False})
-    json.dump({"pid": proc.pid, "folder": folder, "started": MEETING["started"]}, open(ACTIVE, "w"))
+    write_json(ACTIVE, {"pid": proc.pid, "folder": folder, "started": MEETING["started"]})
     STATUS.update(meeting=True, meeting_started=MEETING["started"], meeting_folder=folder)
     print("meeting: recording to", folder, "pid", proc.pid, flush=True)
 
@@ -1198,7 +1309,7 @@ def meeting_recover():
     and transcribe any meeting that has audio but no transcript yet."""
     try: a = json.load(open(ACTIVE))
     except Exception: a = None
-    if a and _alive(a["pid"]):
+    if a and _is_recorder(a["pid"]):
         MEETING.update(on=True, started=a["started"], folder=a["folder"], pid=a["pid"], proc=None)
         STATUS.update(meeting=True, meeting_started=a["started"], meeting_folder=a["folder"])
         print("meeting: still recording", a["folder"], flush=True)
@@ -1209,9 +1320,11 @@ def meeting_recover():
     # any other recorder left from an earlier meeting would keep the mic open: end it
     import subprocess
     keep = MEETING.get("pid") if MEETING["on"] else None
+    try: task_pid = json.load(open(TASK_ACTIVE)).get("pid")     # task_recover finishes that one properly
+    except Exception: task_pid = None
     for line in subprocess.run(["pgrep", "-f", REC], capture_output=True, text=True).stdout.split():
         pid = int(line)
-        if pid != keep and pid != os.getpid():
+        if pid not in (keep, task_pid) and pid != os.getpid():
             print("meeting: ending a leftover recorder", pid, flush=True)
             try: os.kill(pid, signal.SIGKILL)
             except OSError: pass
@@ -1239,7 +1352,7 @@ def meeting_transcribe(folder, wav):
                  else stt_meeting(meeting_audio(wav), "meeting.m4a"))
         if not d:                                        # failed: keep the audio, retry on next start
             raise RuntimeError("transcription failed")
-        json.dump(d, open(os.path.join(folder, "transcript.json"), "w"), indent=1)
+        write_json(os.path.join(folder, "transcript.json"), d, indent=1)
         segs = d.get("transcriptSegments") or []
         def ts(ms, srt=False):
             s, ms = divmod(int(ms), 1000); h, s = divmod(s, 3600); m, s = divmod(s, 60)
@@ -1265,10 +1378,14 @@ def meeting_transcribe(folder, wav):
         if LIVE["folder"] == folder:                    # the board switches to the final transcript
             LIVE.update(segs=[{"start": g.get("startMs", 0), "end": g.get("endMs", 0), "speaker": g.get("speakerLabel") or "Speaker",
                                "text": g.get("text", "").strip()} for g in segs], final=True)
-        if LIVE["folder"] == folder and LIVE["ai"]:          # keep what the prompt said, next to the transcript
+        ai = list(LIVE["ai"]) if LIVE["folder"] == folder else []
+        if not ai:                                       # the board showed another meeting meanwhile: they're in live.json
+            try: ai = json.load(open(os.path.join(folder, "live.json"))).get("ai") or []
+            except Exception: ai = []
+        if ai:                                           # keep what the prompt said, next to the transcript
             open(os.path.join(folder, "prompt-replies.txt"), "w").write("\n\n".join(
-                f"[{_ts(x['at'])}] {x['speaker']}: {x['said']}\n  → {x['reply']}" for x in LIVE["ai"]) + "\n")
-            json.dump(LIVE["ai"], open(os.path.join(folder, "prompt-replies.json"), "w"))   # so the board can show them again
+                f"[{_ts(x['at'])}] {x['speaker']}: {x['said']}\n  → {x['reply']}" for x in ai) + "\n")
+            write_json(os.path.join(folder, "prompt-replies.json"), ai)   # so the board can show them again
         try: os.remove(os.path.join(folder, "live.json"))
         except OSError: pass
         STATUS.update(meeting_done=folder, meeting_done_at=time.time())
@@ -1330,6 +1447,7 @@ def live_pass(folder):
     try: size = os.path.getsize(wav)
     except OSError: return
     end = size - (size - WAV_HEADER) % 2
+    end = min(end, LIVE["offset"] + 120 * 32000)                # at most 2 min per pass (opened late: it catches up)
     if end - LIVE["offset"] < 8 * 32000: return              # wait for at least 8 s of new audio
     with open(wav, "rb") as f:
         f.seek(LIVE["offset"]); raw = f.read(end - LIVE["offset"])
@@ -1365,8 +1483,8 @@ def live_pass(folder):
     apply_prompt(new)
 
 def live_save(folder):
-    try: json.dump({"segs": LIVE["segs"], "offset": LIVE["offset"], "ai": LIVE["ai"]}, open(os.path.join(folder, "live.json"), "w"))
-    except OSError: pass
+    try: write_json(os.path.join(folder, "live.json"), {"segs": list(LIVE["segs"]), "offset": LIVE["offset"], "ai": list(LIVE["ai"])})
+    except (OSError, RuntimeError): pass
 
 def _ts(ms):
     s = int(ms // 1000); h = s // 3600
@@ -1468,6 +1586,40 @@ CARDS_FILE = os.path.join(TASKS, "cards.json")       # every card (survives rest
 TASK = {"recording": False, "started": 0, "pid": None, "folder": "", "card": "", "live": "", "transcribing": False}
 CARDS = []                                            # [{id, original, ai, prompt, busy, hidden}], oldest first
 
+TASK_ACTIVE = os.path.join(TASKS, "active.json")    # the task recording in progress (a restart finishes it)
+
+def _is_recorder(pid):
+    """That pid is still one of our recorders (after a reboot the number can belong to something else)."""
+    import subprocess
+    if not pid or not _alive(pid): return False
+    cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return "meeting_rec.py" in cmd
+
+def task_recover():
+    """The server restarted during a task recording: end the recording and put what was said on its card."""
+    try: a = json.load(open(TASK_ACTIVE))
+    except Exception: return
+    pid, folder, cid = a.get("pid"), a.get("folder", ""), a.get("card", "")
+    if _is_recorder(pid):
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+        for _ in range(100):
+            if not _alive(pid): break
+            time.sleep(0.1)
+    wav = os.path.join(folder, "audio.wav")
+    try: os.unlink(TASK_ACTIVE)
+    except OSError: pass
+    if not os.path.isfile(wav): return
+    subprocess_repair(wav)
+    text = transcribe(wav)
+    c = card(cid)
+    if text and c:
+        c["original"] = (c["original"].rstrip() + "\n\n" + text).strip() if c["original"] else text
+        task_save()
+        try: os.unlink(wav)
+        except OSError: pass
+    print("task board: finished a recording cut off by a restart:", len(text or ""), "chars", flush=True)
+
 def card(cid):
     return next((c for c in CARDS if c["id"] == cid), None)
 
@@ -1478,12 +1630,15 @@ def task_view():
 
 def task_save():
     os.makedirs(TASKS, exist_ok=True)
-    json.dump([{k: c[k] for k in ("id", "original", "ai", "prompt", "hidden")} for c in CARDS], open(CARDS_FILE, "w"), indent=1)
+    write_json(CARDS_FILE, [{k: c[k] for k in ("id", "original", "ai", "prompt", "hidden")} for c in list(CARDS)], indent=1)
 
 def task_load():
     try:
         CARDS[:] = [dict(c, busy=False) for c in json.load(open(CARDS_FILE))]
     except Exception:
+        if os.path.exists(CARDS_FILE):                   # there, but unreadable: keep it aside, don't overwrite it
+            bad = CARDS_FILE + time.strftime(".unreadable-%Y%m%d-%H%M%S")
+            os.replace(CARDS_FILE, bad); print("task board: cards.json was unreadable; kept as", bad, flush=True)
         old = os.path.join(TASKS, "current.json")      # the single board from before
         try:
             c = json.load(open(old))
@@ -1519,11 +1674,21 @@ def card_delete(cid):
     task_save()
 
 def task_start(cid="", new=False):
+    if TASK["recording"] or TASK.get("pending"): return
+    if TASK["transcribing"]:                      # the last one is still being written down: start right after it
+        TASK["pending"] = (cid, new)
+        def later():
+            for _ in range(900):                  # up to 90 s
+                if not TASK["transcribing"]: break
+                time.sleep(0.1)
+            p = TASK.pop("pending", None)
+            if p and not TASK["transcribing"]: _task_start_now(*p)
+        threading.Thread(target=later, daemon=True).start()
+        return
+    _task_start_now(cid, new)
+
+def _task_start_now(cid, new):
     import subprocess
-    if TASK["recording"]: return
-    for _ in range(100):                        # the last one is still being written down: queue behind it
-        if not TASK["transcribing"]: break
-        time.sleep(0.1)
     c = card_new() if new or not card(cid) else card(cid)
     c["hidden"] = False
     folder = os.path.join(TASKS, time.strftime("%Y-%m-%d %H-%M-%S"))
@@ -1532,9 +1697,10 @@ def task_start(cid="", new=False):
                             stdout=open(os.path.join(folder, "recorder.log"), "w"), stderr=subprocess.STDOUT,
                             start_new_session=True)
     TASK.update(recording=True, started=time.time(), pid=proc.pid, folder=folder, card=c["id"], live="", proc=proc,
-                off=WAV_HEADER, pieces=[])
+                off=WAV_HEADER, pieces=[], failed=False)
     TASK["live_thread"] = threading.Thread(target=task_live, args=(folder,), daemon=True)
     TASK["live_thread"].start()
+    write_json(TASK_ACTIVE, {"pid": proc.pid, "folder": folder, "card": c["id"]})   # a restart finishes it
     print("task board: recording to", folder, "for card", c["id"], flush=True)
 
 def task_piece(folder, final=False):
@@ -1556,7 +1722,9 @@ def task_piece(folder, final=False):
     x = x[:cut]
     if speech_seconds_pcm(x) < (0.1 if final else 0.3): TASK["off"] = off + 2 * cut; return   # silence: nothing to pay for
     t = stt_text_pcm(x)
-    if t is None: return                                        # failed: try this audio again next pass
+    if t is None:                                               # failed: live, try this audio again next pass
+        if final: TASK["failed"] = True                         # at the end: keep the audio, say so
+        return
     TASK["off"] = off + 2 * cut
     if t:
         prev = TASK["pieces"][-1] if TASK["pieces"] else ""
@@ -1572,6 +1740,7 @@ def task_live(folder):
         task_piece(folder)
 
 def task_stop():
+    if TASK.pop("pending", None): return         # let go before it could start
     if not TASK["recording"]: return
     pid, folder, cid = TASK["pid"], TASK["folder"], TASK["card"]
     TASK.update(recording=False, transcribing=True)
@@ -1595,13 +1764,20 @@ def task_stop():
         finally:
             TASK.update(transcribing=False, live="")
         c = card(cid)
+        failed = TASK.get("failed")
         if text and c:                              # a second recording on a card adds to it
             c["original"] = (c["original"].rstrip() + "\n\n" + text).strip() if c["original"] else text
             open(os.path.join(folder, "original.txt"), "w").write(text)
+        if failed:                                  # (part of) it couldn't be transcribed: keep the audio
+            subprocess_repair(wav)
+            tell("Part of your task recording couldn't be transcribed; the audio is kept in " + folder)
+        elif text:
             try: os.unlink(wav)                     # the words are kept; the audio isn't needed
             except OSError: pass
         else:                                       # nothing said: leave nothing behind
             import shutil; shutil.rmtree(folder, ignore_errors=True)
+        try: os.unlink(TASK_ACTIVE)
+        except OSError: pass
         task_save()
         print("task board: transcribed", len(text), "chars", flush=True)
     threading.Thread(target=finish, daemon=True).start()
@@ -1648,14 +1824,28 @@ def task_post(path, ev):
 
 task_load()
 
-WATCH = {"beat": time.time()}
+def awake():
+    """Seconds of the Mac being awake (stops during sleep, unlike time.time())."""
+    return time.clock_gettime(time.CLOCK_UPTIME_RAW)
+
+WATCH = {"beat": awake()}
+
+def close_stream(st):
+    """Stop and close a PortAudio stream without waiting on it forever: Core Audio can hang on close (after a
+    device change), and the hold-to-talk loop must keep ticking (else the watchdog restarts the server)."""
+    if st is None: return
+    def run():
+        try: st.stop(); st.close()
+        except Exception: pass
+    t = threading.Thread(target=run, daemon=True); t.start(); t.join(2)
+    if t.is_alive(): print("audio: a mic stream is stuck closing; left it behind", flush=True)
 
 def watchdog():
     """The recorder can get stuck inside the audio system (e.g. after a Gemini audio stall). If it stops
     ticking, restart the whole server (launchd brings it straight back) so the mic works again."""
     while True:
         time.sleep(3)
-        stuck = time.time() - WATCH["beat"]
+        stuck = awake() - WATCH["beat"]
         if stuck > 10:
             print(f"watchdog: recorder stuck for {stuck:.0f}s; restarting the voice server", flush=True)
             os._exit(1)
@@ -1663,6 +1853,7 @@ def watchdog():
 threading.Thread(target=command_watch, daemon=True).start()
 threading.Thread(target=watchdog, daemon=True).start()
 threading.Thread(target=meeting_recover, daemon=True).start()
+threading.Thread(target=task_recover, daemon=True).start()
 threading.Thread(target=meeting_live, daemon=True).start()
 threading.Thread(target=auto_listen, daemon=True).start()
 print("kitten server ready on", PORT, MODEL_NAME, flush=True)
