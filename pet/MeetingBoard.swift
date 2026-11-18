@@ -23,7 +23,7 @@ struct LiveView: Decodable, Equatable {
 }
 
 final class MeetingBoardModel: ObservableObject {
-    @Published var v = LiveView()
+    @Published var v = LiveView() { didSet { if v.segments != oldValue.segments || v.ai != oldValue.ai { rebuild() } } }
     @Published var shown = false
     @Published var prompt = UserDefaults.standard.string(forKey: "meetingBoardPrompt") ?? ""
     @Published var question = ""
@@ -34,20 +34,27 @@ final class MeetingBoardModel: ObservableObject {
     var onAsk: () -> Void = {}
 
     /// The prompt's replies that belong under a block: from its start until the next block starts.
-    func notes(for b: Block) -> [AINote] {
-        let bs = blocks, next = bs.first { $0.start > b.start }?.start ?? .infinity
-        return v.ai.filter { $0.at >= b.start && $0.at < next }
-    }
+    func notes(for b: Block) -> [AINote] { notesByBlock[b.id] ?? [] }
 
-    /// Consecutive lines from the same speaker read as one paragraph.
+    /// Consecutive lines from the same speaker read as one paragraph. Built once per transcript change (it used to
+    /// be rebuilt for every row, every second: slower and slower as the meeting went on).
     struct Block: Identifiable { let id: Int; let start: Double; let speaker: String; var text: String }
-    var blocks: [Block] {
+    private(set) var blocks: [Block] = []
+    private var notesByBlock: [Int: [AINote]] = [:]
+
+    private func rebuild() {
         var out: [Block] = []
         for (i, s) in v.segments.enumerated() {
             if let last = out.last, last.speaker == s.speaker { out[out.count - 1].text += " " + s.text }
             else { out.append(Block(id: i, start: s.start, speaker: s.speaker, text: s.text)) }
         }
-        return out
+        var notes: [Int: [AINote]] = [:]
+        for (i, b) in out.enumerated() {
+            let next = i + 1 < out.count ? out[i + 1].start : .infinity
+            let mine = v.ai.filter { $0.at >= b.start && $0.at < next }
+            if !mine.isEmpty { notes[b.id] = mine }
+        }
+        blocks = out; notesByBlock = notes
     }
 }
 
@@ -112,7 +119,7 @@ struct MeetingBoardView: View {
         .scaleEffect(m.shown ? 1 : 0.92, anchor: .topTrailing)
         .opacity(m.shown ? 1 : 0)
         .animation(m.shown ? OSMotion.show : .easeInOut(duration: 0.35), value: m.shown)
-        .onReceive(tick) { now = $0 }
+        .onReceive(tick) { if m.v.recording { now = $0 } }     // only the recording timer needs the second hand
     }
 
     private var promptBar: some View {
@@ -280,9 +287,10 @@ final class MeetingBoard: NSObject, NSWindowDelegate {
         }
         m.onSetPrompt = { [weak self] in
             guard let self else { return }
-            UserDefaults.standard.set(self.m.prompt, forKey: "meetingBoardPrompt")
-            self.post("/meeting/prompt", self.m.prompt)
-            self.m.v.prompt = self.m.prompt
+            let p = self.m.prompt.trimmingCharacters(in: .whitespacesAndNewlines)   // as the server keeps it
+            UserDefaults.standard.set(p, forKey: "meetingBoardPrompt")
+            self.post("/meeting/prompt", p)
+            self.m.prompt = p; self.m.v.prompt = p
         }
         m.onAsk = { [weak self] in
             guard let self else { return }
@@ -299,26 +307,35 @@ final class MeetingBoard: NSObject, NSWindowDelegate {
         poll()
     }
 
-    private func post(_ path: String, _ text: String, timeout: TimeInterval = 3, done: (() -> Void)? = nil) {
+    private func post(_ path: String, _ text: String, timeout: TimeInterval = 3, repoll: Bool = true, done: (() -> Void)? = nil) {
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123" + path)!)
         req.httpMethod = "POST"; req.timeoutInterval = timeout
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
         URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
-            DispatchQueue.main.async { done?(); self?.poll() }
+            DispatchQueue.main.async { done?(); if repoll { self?.poll() } }
         }.resume()
     }
 
+    private var polling = false                  // one poll at a time (each one carries the whole transcript)
+    private var resyncing = false                // giving the server its prompt back: once, not on every poll
+
     private func poll() {
+        guard enabled, !polling else { return }
+        polling = true
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/meeting/live")!)
         req.timeoutInterval = 1.5
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            DispatchQueue.main.async { self?.polling = false }
             guard let data, let v = try? JSONDecoder().decode(LiveView.self, from: data) else { return }
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.enabled else { return }                 // turned off meanwhile: stay hidden
                 let startedNew = v.recording && v.folder != self.m.v.folder
-                // the server forgot the prompt (it restarted): give it back
-                let saved = UserDefaults.standard.string(forKey: "meetingBoardPrompt") ?? ""
-                if v.prompt != saved { self.post("/meeting/prompt", saved) }
+                // the server forgot the prompt (it restarted): give it back (trimmed, as it stores it)
+                let saved = (UserDefaults.standard.string(forKey: "meetingBoardPrompt") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if v.prompt != saved, !self.resyncing {
+                    self.resyncing = true
+                    self.post("/meeting/prompt", saved, repoll: false) { [weak self] in self?.resyncing = false }
+                }
                 var nv = v; nv.prompt = saved
                 if self.m.asking { nv.ask = self.m.v.ask }               // keep the question showing until it's answered
                 if nv != self.m.v { self.m.v = nv }

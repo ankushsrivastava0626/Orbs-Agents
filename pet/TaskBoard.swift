@@ -67,7 +67,7 @@ struct TaskBoardView: View {
         .scaleEffect(m.shown ? 1 : 0.92, anchor: .topTrailing)
         .opacity(m.shown ? 1 : 0)
         .animation(m.shown ? OSMotion.show : .easeInOut(duration: 0.35), value: m.shown)
-        .onReceive(tick) { now = $0 }
+        .onReceive(tick) { if m.v.recording { now = $0 } }     // only the recording timer needs the second hand
 
     }
 
@@ -365,7 +365,7 @@ final class TaskBoard: NSObject {
 
     private static func pointerInCorner() -> Bool {
         let p = NSEvent.mouseLocation
-        guard let f = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.main)?.frame else { return false }
+        guard let f = (NSScreen.screens.first { NSMouseInRect(p, $0.frame, false) } ?? NSScreen.main)?.frame else { return false }
         return p.x <= f.minX + 1 && p.y >= f.maxY - 1              // pinned in the corner, not just near it
     }
 
@@ -379,7 +379,7 @@ final class TaskBoard: NSObject {
         guard !ids.isEmpty else { return }
         peeking = true; peekActive = Date()
         let p = NSEvent.mouseLocation
-        let s = (NSScreen.screens.first { $0.frame.contains(p) } ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let s = (NSScreen.screens.first { NSMouseInRect(p, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
         // each card at the size that shows all of it, laid out in rows from the top-left
         let gap: CGFloat = 12, margin: CGFloat = 16
         let maxW = min(460, s.width - 2 * margin), maxH = s.height - 2 * margin
@@ -425,25 +425,43 @@ final class TaskBoard: NSObject {
     /// Hold `: a fresh card comes up and records until you let go; it stays open with what you said.
     func hold(_ down: Bool) { post("/task/record", ["text": down ? "new" : "stop"]) }
 
+    // Every request is numbered when sent and a reply older than one already applied is dropped: a poll sent before
+    // you pressed ✕ (or trash, +, record) but answered after it used to undo the press. Presses go one at a time.
+    private var issued = 0, applied = 0
+    private var polling = false
+    private let postQ = DispatchQueue(label: "voicepet.task-posts")
+
     func post(_ path: String, _ body: [String: String] = [:]) {
+        issued += 1
+        let n = issued
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123" + path)!)
         req.httpMethod = "POST"; req.timeoutInterval = 12
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            DispatchQueue.main.async { self?.apply(data) }
-        }.resume()
+        postQ.async {                                                 // in order: a ` release never overtakes its press
+            let done = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+                DispatchQueue.main.async { self?.apply(data, n) }
+                done.signal()
+            }.resume()
+            _ = done.wait(timeout: .now() + 13)
+        }
     }
 
     private func poll() {
+        guard !polling else { return }
+        polling = true
+        issued += 1
+        let n = issued
         var req = URLRequest(url: URL(string: "http://127.0.0.1:5123/task")!)
         req.timeoutInterval = 1.5
         URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
-            DispatchQueue.main.async { self?.apply(data) }
+            DispatchQueue.main.async { self?.polling = false; self?.apply(data, n) }
         }.resume()
     }
 
-    private func apply(_ data: Data?) {
-        guard let data, let t = try? JSONDecoder().decode(ServerTasks.self, from: data) else { return }
+    private func apply(_ data: Data?, _ n: Int) {
+        guard n > applied, let data, let t = try? JSONDecoder().decode(ServerTasks.self, from: data) else { return }
+        applied = n
         let ids = Set(t.cards.map(\.id))
         for (id, b) in boards where !ids.contains(id) { b.close(); boards[id] = nil }   // deleted
         order = t.cards.map(\.id)
@@ -522,7 +540,8 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
     func update(_ v: TaskView) {
         if m.sent && v.busy { sawBusy = true }
         if m.sent && sawBusy && !v.busy {                            // the AI answered: flip to its version
-            m.sent = false; sawBusy = false; m.flipped = !v.ai.isEmpty
+            m.sent = false; sawBusy = false
+            if m.editing.isEmpty { m.flipped = !v.ai.isEmpty }           // not under you while you edit
         }
         if v.ai.isEmpty && m.flipped { m.flipped = false }
         if v.recording && m.flipped { m.flipped = false }            // recording shows your words
@@ -593,11 +612,13 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
     }
 
     private var peeked = false                   // laid out by the quick look: don't remember that spot
+    private var peekGen = 0                      // delayed steps of an earlier quick look check this and give up
 
     func peek(to r: NSRect) {
         let fresh = panel == nil || !m.shown
         show()
         peeked = true
+        peekGen += 1
         guard let p = panel else { return }
         userMoving = false
         if fresh { p.setFrame(r, display: true) }
@@ -609,10 +630,15 @@ final class TaskCardWindow: NSObject, NSWindowDelegate {
         userMoving = false
         if hidden { hide() }
         let back = UserDefaults.standard.string(forKey: frameKey).map(NSRectFromString) ?? p.frame
+        peekGen += 1
+        let gen = peekGen
         DispatchQueue.main.asyncAfter(deadline: .now() + (hidden ? 0.36 : 0)) { [weak self] in
+            guard let self, self.peekGen == gen else { return }      // a new quick look started meanwhile
             if hidden { p.setFrame(back, display: false) }
             else { NSAnimationContext.runAnimationGroup { $0.duration = 0.3; p.animator().setFrame(back, display: true) } }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { self?.peeked = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                if let self, self.peekGen == gen { self.peeked = false }
+            }
         }
     }
 

@@ -20,7 +20,7 @@ struct MeetingBadgeView: View {
             .contentShape(Rectangle())
             .help(on ? String(format: "Recording %d:%02d — double-tap right Option to stop", s / 60, s % 60)
                      : busy ? "Transcribing the meeting" : "")
-            .onReceive(tick) { now = $0 }
+            .onReceive(tick) { if m.s.meeting { now = $0 } }     // only a recording needs the second hand
     }
 }
 

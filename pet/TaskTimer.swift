@@ -293,14 +293,20 @@ final class TaskTimer: ObservableObject {
         let x = min(max(top.x - w / 2, screen.minX + 8), screen.maxX - w - 8)
         prompt?.setFrame(NSRect(x: x, y: top.y - h, width: w, height: h), display: true)
         draft = ""
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            returnTo = NSWorkspace.shared.frontmostApplication
+        }
         NSApp.activate(ignoringOtherApps: true)
         prompt?.makeKeyAndOrderFront(nil)
         promptShown = true
     }
 
+    private var returnTo: NSRunningApplication?   // the app you were in: typing goes back there when the prompt closes
+
     func closePrompt() {
         guard promptShown else { return }
         promptShown = false
+        returnTo?.activate(); returnTo = nil
         let p = prompt
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in if self?.promptShown == false { p?.orderOut(nil) } }
     }

@@ -23,9 +23,11 @@ final class SystemAudio {
     private let q = DispatchQueue(label: "voicepet.system-audio")
 
     /// Called a few times a second with the server's meeting state.
+    private var failedAt: Date? = nil              // the tap wouldn't start: try again in a while, not 3×/s
+
     func sync(meeting: Bool, folder f: String) {
         if meeting, enabled, !f.isEmpty {
-            if folder != f { stop(); start(f) }
+            if folder != f, Date().timeIntervalSince(failedAt ?? .distantPast) > 10 { stop(); start(f) }
         } else if folder != nil {
             stop()
         }
@@ -49,12 +51,15 @@ final class SystemAudio {
         let size = Int64(h.seekToEndOfFile())
         written = max(0, (size - 44) / 2)
         let expected = Int64((Date().timeIntervalSince1970 - started) * 16000)
-        if expected > written { h.write(Data(count: Int(expected - written) * 2)); written = expected }
+        if expected > written { try? h.write(contentsOf: Data(count: Int(expected - written) * 2)); written = expected }
         file = h
         writeMeta(meta, started: started, ended: false)
         folder = f
-        if !startTap() { print("system audio: couldn't start the tap"); }
-        else { print("system audio: recording to", wav) }
+        if !startTap() {                                 // undo, so the next sync tries again (later)
+            print("system audio: couldn't start the tap")
+            failedAt = Date()
+            stop()
+        } else { failedAt = nil; print("system audio: recording to", wav) }
     }
 
     private func stop() {
@@ -130,7 +135,7 @@ final class SystemAudio {
             fed = true; status.pointee = .haveData; return inBuf
         }
         guard out.frameLength > 0, let ch = out.int16ChannelData else { return }
-        file.write(Data(bytes: ch[0], count: Int(out.frameLength) * 2))
+        guard (try? file.write(contentsOf: Data(bytes: ch[0], count: Int(out.frameLength) * 2))) != nil else { return }   // disk full: skip, don't crash
         written += Int64(out.frameLength)
         if Date().timeIntervalSince(lastHeader) > 5 { updateHeader() }   // readable while it records
     }
@@ -139,7 +144,7 @@ final class SystemAudio {
         guard let file else { return }
         lastHeader = Date()
         let end = file.offsetInFile
-        file.seek(toFileOffset: 0); file.write(Self.header(UInt32(written * 2))); file.seek(toFileOffset: end)
+        try? file.seek(toOffset: 0); try? file.write(contentsOf: Self.header(UInt32(written * 2))); try? file.seek(toOffset: end)
     }
 
     static func header(_ dataBytes: UInt32) -> Data {

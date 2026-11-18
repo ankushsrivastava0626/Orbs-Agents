@@ -145,8 +145,8 @@ final class Canvas: NSObject, NSWindowDelegate {
                 let s = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
                 base = NSRect(x: s.maxX - 340 - 16, y: s.maxY - 160 - 12, width: 340, height: 160)
             }
+            panel = p                                                 // first: set() below needs the window
             set(base, animate: false)
-            panel = p
             m.onNeeded = { [weak self] h in self?.fit(h) }
         }
         panel?.orderFrontRegardless()
@@ -154,9 +154,15 @@ final class Canvas: NSObject, NSWindowDelegate {
     }
 
     private func set(_ r: NSRect, animate: Bool) {
+        guard let p = panel else { return }
         programmatic = true
-        panel?.setFrame(r, display: true, animate: animate)
-        programmatic = false
+        if animate {                                                 // animator: doesn't hold the main thread
+            NSAnimationContext.runAnimationGroup({ $0.duration = 0.2; p.animator().setFrame(r, display: true) },
+                                                 completionHandler: { [weak self] in self?.programmatic = false })
+        } else {
+            p.setFrame(r, display: true)
+            programmatic = false
+        }
     }
 
     /// Grow to fit the text, never below your size; keep the top edge where it is.
@@ -166,6 +172,7 @@ final class Canvas: NSObject, NSWindowDelegate {
         let top = p.frame.maxY
         var height = max(base.height, ceil(h) + 4)
         if let s = p.screen?.visibleFrame { height = min(height, top - s.minY - 8) }   // never past the bottom of the screen
+        height = max(height, p.minSize.height)                       // …nor smaller than a card
         guard abs(height - p.frame.height) > 1 else { return }
         set(NSRect(x: p.frame.minX, y: top - height, width: p.frame.width, height: height), animate: true)
     }

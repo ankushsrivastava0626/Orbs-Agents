@@ -40,12 +40,14 @@ final class PomodoroModel: ObservableObject {
         let t = text.lowercased().replacingOccurrences(of: " ", with: "")
         if t.contains(":") {
             let p = t.split(separator: ":").map { Int($0) }
-            guard p.count == 2, let m = p[0], let s = p[1] else { return nil }
+            guard p.count == 2, let m = p[0], let s = p[1], (0..<100_000).contains(m), (0..<100_000).contains(s) else { return nil }
             return m * 60 + s
         }
+        // "inf", "nan" or a huge number used to crash the pet (Int(v * 60) traps)
+        func minutes(_ v: Double) -> Int? { v.isFinite && v >= 0 && v < 100_000 ? Int(v * 60) : nil }
         if t.hasSuffix("s"), let v = Int(t.dropLast()) { return v }
-        if t.hasSuffix("m"), let v = Double(t.dropLast()) { return Int(v * 60) }
-        if let v = Double(t) { return Int(v * 60) }
+        if t.hasSuffix("m"), let v = Double(t.dropLast()) { return minutes(v) }
+        if let v = Double(t) { return minutes(v) }
         return nil
     }
     @Published var left: Double = 0
@@ -193,6 +195,7 @@ final class PomodoroHost: NSHostingView<PomodoroView> {
         downAt = p
     }
     override func mouseUp(with e: NSEvent) {
+        guard downAt != nil else { return }      // the press went to a button inside ("+extra"): not a tap on the timer
         if !moved { onTap?() } else if let w = window { UserDefaults.standard.set(NSStringFromPoint(w.frame.origin), forKey: "pomodoroOrigin") }
         downAt = nil
     }
@@ -238,6 +241,7 @@ final class Pomodoro {
             let v = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
             origin = NSPoint(x: v.minX + 4, y: v.minY + 2)
         }
+        origin = Self.onScreen(origin, size)
         p.setFrame(NSRect(origin: origin, size: size), display: true)
         panel = p
         if !hidden { p.orderFrontRegardless() }
@@ -245,6 +249,14 @@ final class Pomodoro {
 
     private var dark: [NSPanel] = []
     private var keyMonitors: [Any] = []
+
+    /// A saved spot can be on a display that's gone (then a ringing timer could never be clicked): bring it back.
+    static func onScreen(_ o: NSPoint, _ size: NSSize) -> NSPoint {
+        let r = NSRect(origin: o, size: size)
+        if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(r) }) { return o }
+        let v = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        return NSPoint(x: v.minX + 4, y: v.minY + 2)
+    }
 
     /// Time's up: every screen goes black except the timer, until you restart or take +30.
     private func darken(_ on: Bool) {
@@ -255,11 +267,13 @@ final class Pomodoro {
                 d.level = .screenSaver
                 d.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
                 d.setFrame(s.frame, display: true)
+                d.contentView = TapCatcher { [weak self] in if self?.m.ringing == true { self?.m.tap() } }   // a click ends it too
                 d.alphaValue = 0
                 d.orderFrontRegardless()
                 NSAnimationContext.runAnimationGroup { $0.duration = 0.6; d.animator().alphaValue = 1 }
                 dark.append(d)
             }
+            if let p = panel { p.setFrameOrigin(Self.onScreen(p.frame.origin, p.frame.size)) }
             panel?.alphaValue = 1
             panel?.orderFrontRegardless()
             // any key (space, anything) = back to the screen and start the next timer
@@ -292,9 +306,12 @@ final class Pomodoro {
         f.stringValue = String(format: "%d:%02d", current / 60, current % 60)
         a.accessoryView = f
         a.addButton(withTitle: "Set"); a.addButton(withTitle: "Cancel")
+        let prev = NSWorkspace.shared.frontmostApplication
         NSApp.activate(ignoringOtherApps: true)
         a.window.initialFirstResponder = f
-        guard a.runModal() == .alertFirstButtonReturn, let s = PomodoroModel.parse(f.stringValue), s >= 5, s <= 24 * 3600 else { return nil }
+        let ok = a.runModal() == .alertFirstButtonReturn
+        prev?.activate()                                                 // typing goes back where it was
+        guard ok, let s = PomodoroModel.parse(f.stringValue), s >= 5, s <= 24 * 3600 else { return nil }
         return s
     }
 
@@ -345,4 +362,13 @@ final class Pomodoro {
         })
         return menu
     }
+}
+
+/// A view that calls `tap` on any click (the dark screens of a ringing timer).
+final class TapCatcher: NSView {
+    private let tap: () -> Void
+    init(_ tap: @escaping () -> Void) { self.tap = tap; super.init(frame: .zero) }
+    required init?(coder: NSCoder) { fatalError() }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with e: NSEvent) { tap() }
 }
