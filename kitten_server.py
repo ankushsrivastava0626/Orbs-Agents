@@ -55,7 +55,7 @@ import sounddevice as sd
 import json, time
 STATUS = {"last_said": {}, "muted_sessions": [], "captions": [], "target": "voice", "target_kind": "claude", "sessions": {}, "speaking_session": "",
           "pending_note": None, "saved_note": None, "notes": False, "out_level": 0.0, "problem_at": 0, "auto": False, "ptt": False, "voice_claude": "idle", "voice_claude_at": 0,
-          "listening": False, "level": 0.0, "transcribing": False, "heard": "", "heard_at": 0,
+          "listening": False, "level": 0.0, "transcribing": False, "transcribing_orbs": [], "heard": "", "heard_at": 0,
           "speaking": False, "spoken": "", "claude": "idle", "step": "", "claude_at": 0}
 
 SR = 24000
@@ -968,11 +968,12 @@ def deliver(path, as_note=False, target=None, gate=0.15, newest=None):
             return True
         return False
     if superseded(): return ""
-    with _transcribing_lock: _transcribing[0] += 1; STATUS["transcribing"] = True
+    orb = None if (as_note or STATUS["notes"]) else ((target or (None,))[0] or STATUS.get("target") or "voice")
+    transcribing(orb, +1)                                # its orb turns coral meanwhile
     try:
         text = transcribe(path)
     finally:
-        with _transcribing_lock: _transcribing[0] -= 1; STATUS["transcribing"] = _transcribing[0] > 0
+        transcribing(orb, -1)
     if superseded(): return ""
     if text is None:                                     # failed: keep what you said, don't throw it away
         keep = os.path.join(DIR, "failed"); os.makedirs(keep, exist_ok=True)
@@ -993,6 +994,17 @@ def deliver(path, as_note=False, target=None, gate=0.15, newest=None):
     return text
 
 _transcribing, _transcribing_lock = [0], threading.Lock()   # how many recordings are being transcribed right now
+_tx_orbs = {}                                                # orb -> how many of its recordings are being transcribed
+
+def transcribing(orb, d):
+    """Count a transcription in or out: STATUS says whether any is running, and for which orbs (each shows coral)."""
+    with _transcribing_lock:
+        _transcribing[0] += d
+        if orb:
+            _tx_orbs[orb] = _tx_orbs.get(orb, 0) + d
+            if _tx_orbs[orb] <= 0: _tx_orbs.pop(orb)
+        STATUS["transcribing"] = _transcribing[0] > 0
+        STATUS["transcribing_orbs"] = sorted(_tx_orbs)
 LATEST, _latest_lock = {}, threading.Lock()                  # orb (or notes) -> number of its newest recording
 
 def dest_key(as_note, to):

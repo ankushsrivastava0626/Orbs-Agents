@@ -22,6 +22,7 @@ struct Status: Codable {
     var notes = false
     var auto = false
     var listening = false, level = 0.0, transcribing = false
+    var transcribing_orbs: [String] = []                  // orbs whose recording is being transcribed (they show coral)
     var heard = "", heard_at = 0.0
     var speaking = false, spoken = "", out_level = 0.0
     var claude = "idle", step = "", claude_at = 0.0
@@ -56,6 +57,7 @@ struct Status: Codable {
         pending_note = g("pending_note", nil); saved_note = g("saved_note", nil)
         notes = g("notes", false); auto = g("auto", false)
         listening = g("listening", false); level = g("level", 0.0); transcribing = g("transcribing", false)
+        transcribing_orbs = g("transcribing_orbs", [])
         heard = g("heard", ""); heard_at = g("heard_at", 0.0)
         speaking = g("speaking", false); spoken = g("spoken", ""); out_level = g("out_level", 0.0)
         claude = g("claude", "idle"); step = g("step", ""); claude_at = g("claude_at", 0.0)
@@ -77,7 +79,7 @@ struct Status: Codable {
     }
 }
 
-enum Mode { case offline, idle, listening, sent, working, speaking }
+enum Mode { case offline, idle, listening, transcribing, sent, working, speaking }
 
 final class Model: ObservableObject {
     let base: String                 // voice server
@@ -253,7 +255,8 @@ final class Model: ObservableObject {
         if now - s.heard_at < 0.6 { return .sent }                 // one quick green pulse
         if s.speaking { return .speaking }
         let busy = { (state: String, at: Double) in state == "working" && self.now - at < 600 }
-        if s.transcribing || busy(s.voice_claude, s.voice_claude_at) || busy(s.claude, s.claude_at) { return .working }
+        if s.transcribing { return .transcribing }                  // between red (recording) and green (sent)
+        if busy(s.voice_claude, s.voice_claude_at) || busy(s.claude, s.claude_at) { return .working }
         return .idle
     }
 
@@ -283,6 +286,19 @@ struct Orb: View {
 }
 
 /// The orb's look for any session: colour = state, motion = voice level, rings = modes.
+/// The white arc that circles a busy orb (working: purple; transcribing: coral). It reads the clock itself, so it
+/// spins whenever it's shown (the old one was started once, before it existed, and so never moved).
+struct SpinningArc: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in       // 30 fps is smooth enough, and cheaper
+            Circle().trim(from: 0, to: 0.3)
+                .stroke(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .frame(width: 38, height: 38)
+                .rotationEffect(.degrees(tl.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2 * 360))
+        }
+    }
+}
+
 struct OrbFace: View {
     var mode: Mode
     var level = 0.0, outLevel = 0.0
@@ -290,7 +306,6 @@ struct OrbFace: View {
     var idleColor = Color(red: 0.55, green: 0.6, blue: 0.75)
     var selected = false                                   // the session your voice goes to (no longer drawn)
     var muted = false                                      // replies shown as text: small speaker-slash badge
-    @State private var spin = false
     @State private var breathe = false
 
     var color: Color {
@@ -298,6 +313,7 @@ struct OrbFace: View {
         case .offline: return .gray
         case .idle: return idleColor
         case .listening: return Color(red: 1.0, green: 0.27, blue: 0.3)
+        case .transcribing: return Color(red: 1.0, green: 0.5, blue: 0.38)   // coral
         case .sent: return Color(red: 0.2, green: 0.85, blue: 0.45)
         case .working: return Color(red: 0.65, green: 0.4, blue: 1.0)
         case .speaking: return Color(red: 0.25, green: 0.6, blue: 1.0)
@@ -337,12 +353,7 @@ struct OrbFace: View {
                     .frame(width: 30, height: 30)
                     .modifier(Ripple())
             }
-            if mode == .working {
-                Circle().trim(from: 0, to: 0.3)
-                    .stroke(Color.white.opacity(0.85), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                    .frame(width: 38, height: 38)
-                    .rotationEffect(.degrees(spin ? 360 : 0))
-            }
+            if mode == .working || mode == .transcribing { SpinningArc() }
             if muted {
                 Image(systemName: "speaker.slash.fill").font(.system(size: 8, weight: .bold))
                     .foregroundColor(.white)
@@ -360,7 +371,6 @@ struct OrbFace: View {
         .animation(.easeInOut(duration: 0.25), value: mode)
         .frame(width: 56, height: 64)
         .onAppear {
-            withAnimation(.linear(duration: 1.6).repeatForever(autoreverses: false)) { spin = true }
             withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) { breathe = true }
         }
     }
@@ -956,6 +966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .sent: return ("Got it", "")
             case .speaking: return ("Speaking", "")
             case .working: return ("Working", m.s.step)
+            case .transcribing: return ("Transcribing", "")
             case .offline: return ("Voice offline", "")
             case .idle: return ("", "")
             }

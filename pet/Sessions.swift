@@ -71,6 +71,7 @@ struct SessionOrb: View {
             let live = codex.s.thread_id == entry.id
             let codexMode: Mode = !codex.online ? .offline
                 : (target && s.listening) ? .listening                  // the pet is recording for this orb
+                : s.transcribing_orbs.contains(entry.name) ? .transcribing   // its recording is being written down
                 : (target && now - s.heard_at < 0.6) ? .sent
                 : (live ? codex.mode : .idle)
             OrbFace(mode: codexMode,
@@ -84,6 +85,7 @@ struct SessionOrb: View {
             let speaking = s.speaking && s.speaking_session == entry.name
             let mode: Mode = !main.online ? .offline
                 : (target && s.listening) ? .listening
+                : s.transcribing_orbs.contains(entry.name) ? .transcribing   // its recording is being written down
                 : (target && now - s.heard_at < 0.6) ? .sent
                 : speaking ? .speaking
                 : working ? .working : .idle
